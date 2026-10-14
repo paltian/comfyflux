@@ -9,6 +9,7 @@ Beispiele:
   python3 comfyflux.py "nutze die Server-Referenz" --image lokal.png --server-image netz-test.png
   python3 comfyflux.py "mehr Details, schaerfer" --image foto.png --scale 2 -o foto-2x.png
   python3 comfyflux.py "sharpen, keep everything" --image foto.png --scale 2 --pre-upscale -o scharf.png
+  python3 comfyflux.py "fuer den Versand" --no-metadata -o sauber.png
   python3 comfyflux.py "detailreiche Szene" --profile 9b -o gross.png
 """
 import argparse, json, os, random, struct, sys, time, urllib.error, urllib.parse, urllib.request
@@ -150,6 +151,27 @@ def pick_profile(server):
                 continue
             return name, "GPU %.1f GB VRAM, Gewichte vorhanden" % (vram / 1e9)
     return "4b", "Fallback (Gewichte/VRAM unvollstaendig)"
+
+def strip_png_metadata(data):
+    """Entfernt PNG-Text-Metadaten (tEXt/zTXt/iTXt/eXIf = Workflow+Prompts),
+    Pixel bleiben unveraendert."""
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return data
+    out = bytearray(data[:8])
+    i, n = 8, len(data)
+    while i + 8 <= n:
+        length = int.from_bytes(data[i:i + 4], "big")
+        ctype = data[i + 4:i + 8]
+        end = i + 12 + length
+        if end > n:
+            out += data[i:]
+            break
+        if ctype not in (b"tEXt", b"zTXt", b"iTXt", b"eXIf"):
+            out += data[i:end]
+        if ctype == b"IEND":
+            break
+        i = end
+    return bytes(out)
 
 def widget_choices(val):
     """Dateilisten aus object_info-Widgets: [liste, meta] oder ["COMBO", {options}]."""
@@ -301,6 +323,9 @@ def main():
     ap.add_argument("--pre-upscale", action="store_true",
                     help="Referenzen vorab mit Upscaler-Modell vergroessern (Struktur bleibt "
                          "erhalten), danach Refine-Pass; braucht --scale")
+    ap.add_argument("--no-metadata", action="store_true",
+                    help="Workflow/Prompts nicht in die PNG-Metadaten schreiben "
+                         "(fuer Bilder zum Teilen)")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--sampler", default="euler")
     ap.add_argument("--model", default=None, help="ueberschreibt das DiT des Profils")
@@ -388,8 +413,12 @@ def main():
         dest = p.out or ("%s_%d.png" % (p.prefix, p.seed))
         if len(imgs) > 1:
             dest = dest.replace(".png", "_%d.png" % i)
-        with urllib.request.urlopen(p.server + "/view?" + q, timeout=120) as r, open(dest, "wb") as f:
-            f.write(r.read())
+        with urllib.request.urlopen(p.server + "/view?" + q, timeout=120) as r:
+            data = r.read()
+        if p.no_metadata:
+            data = strip_png_metadata(data)
+        with open(dest, "wb") as f:
+            f.write(data)
         saved.append(dest)
     print("fertig in %.1fs -> %s  [seed=%d | reproduzieren: --seed %d]" %
           (time.time() - t0, ", ".join(saved), p.seed, p.seed))

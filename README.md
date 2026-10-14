@@ -75,6 +75,8 @@ All reference flags share one order: `image1..imageN` follow the command line.
 | `--negative` | — | negative prompt |
 | `--seed` | random | reproducibility |
 | `--scale` | — | output = input size × factor (e.g. `2` for 2× resolution detail enhancement; needs references) |
+| `--pre-upscale` | — | upscale references with an upscale model first (structure preserved), then refine; needs `--scale` |
+| `--no-metadata` | — | strip workflow/prompt metadata from output PNGs (for shareable images) |
 | `--batch` | `1` | images per run |
 | `--sampler` | `euler` | sampler selection |
 | `--model/--te/--vae` | from profile | override individual checkpoints |
