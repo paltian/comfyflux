@@ -43,6 +43,15 @@ A running ComfyUI with the FLUX.2 Klein 4B files in place:
 
 Total VRAM footprint: ~8.1 GB — fits a 12 GB card (RTX 3060) fully resident.
 
+For the **9B** profiles use `flux-2-klein-9b-fp8.safetensors` +
+`qwen_3_8b_fp4mixed.safetensors` (6.8 GB, from
+[Comfy-Org/flux2-klein-9B](https://huggingface.co/Comfy-Org/flux2-klein-9B)).
+The 9B diffusion models at [black-forest-labs](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8)
+are gated — accept the license with a (free) HuggingFace account first.
+With fp8 DiT (9.4 GB) + fp4 text encoder (6.8 GB) the 9B family needs
+~16.6 GB VRAM: comfortable on 24 GB, workable on 16 GB (a little Dynamic-VRAM
+spill), too much for 12 GB.
+
 To use different checkpoints (e.g. the `base` variant for CFG > 1):
 
 ```bash
@@ -54,15 +63,16 @@ python3 comfyflux.py "..." --model flux-2-klein-base-4b-fp8.safetensors --cfg 5 
 | Option | Default | Purpose |
 |---|---|---|
 | `prompt` | — | text-to-image prompt, or change request when editing |
+| `--profile` | `4b` | `4b`, `4b-base`, `9b`, `9b-base` — sets model + text encoder + steps/cfg defaults |
 | `--size` | `1024` | `1024` (square) or `BxH` (e.g. `1280x720`); in edit mode it is the megapixel cap |
-| `--steps` | `4` | sampling steps (4 is the distilled sweet spot) |
+| `--steps` | `4` / `20` | sampling steps (4 distilled, 20 base) |
 | `--image` | — | reference image (local path, server-side filename or http(s) URL), repeatable → editing mode |
-| `--cfg` | `1.0` | guidance scale (meaningful for the `base` variant) |
+| `--cfg` | `1.0` / `5.0` | guidance scale (1 distilled, 5 base) |
 | `--negative` | — | negative prompt |
 | `--seed` | random | reproducibility |
 | `--batch` | `1` | images per run |
 | `--sampler` | `euler` | sampler selection |
-| `--model/--te/--vae` | FLUX.2 Klein files | swap checkpoints |
+| `--model/--te/--vae` | from profile | override individual checkpoints |
 | `--server` | `http://127.0.0.1:8188` | any reachable ComfyUI instance |
 | `-o`, `--prefix`, `--timeout` | — | output file, filename prefix, run limit |
 

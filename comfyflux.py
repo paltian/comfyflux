@@ -6,13 +6,22 @@ Beispiele:
   python3 comfyflux.py "ein Igel mit Partyhut" --size 1280x720 -o breit.png
   python3 comfyflux.py "change the party hat to blue" --image igel.png -o blau.png
   python3 comfyflux.py "combine image1 and image2" --image igel.png --image https://example.com/foto.jpg
+  python3 comfyflux.py "detailreiche Szene" --profile 9b -o gross.png
 """
 import argparse, json, os, random, sys, time, urllib.error, urllib.parse, urllib.request
 
-DEFAULTS = {
-    "model": "flux-2-klein-4b-fp8.safetensors",
-    "te": "qwen_3_4b_fp4_flux2.safetensors",
-    "vae": "flux2-vae.safetensors",
+# Modellprofile: name -> (DiT, Text-Encoder, VAE, steps, cfg)
+# Base-Varianten rechnen echtes CFG (2 Pae pro Schritt), Distilled ist auf
+# 4 Schritte/CFG 1 optimiert (siehe offizielle ComfyUI-Templates).
+PROFILES = {
+    "4b":      {"model": "flux-2-klein-4b-fp8.safetensors",      "te": "qwen_3_4b_fp4_flux2.safetensors",
+                "vae": "flux2-vae.safetensors", "steps": 4,  "cfg": 1.0},
+    "4b-base": {"model": "flux-2-klein-base-4b-fp8.safetensors", "te": "qwen_3_4b_fp4_flux2.safetensors",
+                "vae": "flux2-vae.safetensors", "steps": 20, "cfg": 5.0},
+    "9b":      {"model": "flux-2-klein-9b-fp8.safetensors",      "te": "qwen_3_8b_fp4mixed.safetensors",
+                "vae": "flux2-vae.safetensors", "steps": 4,  "cfg": 1.0},
+    "9b-base": {"model": "flux-2-klein-base-9b-fp8.safetensors", "te": "qwen_3_8b_fp4mixed.safetensors",
+                "vae": "flux2-vae.safetensors", "steps": 20, "cfg": 5.0},
 }
 
 def build_t2i(p):
@@ -78,6 +87,18 @@ def post_json(url, payload):
     except urllib.error.HTTPError as e:
         raise SystemExit("Server-Fehler HTTP %s: %s" % (e.code, e.read().decode()[:800]))
 
+def preflight(server, model, te):
+    """Prueft VOR dem Sampling, ob die Gewichte auf dem Server bekannt sind."""
+    problems = []
+    for node, key, fname in (("UNETLoader", "unet_name", model), ("CLIPLoader", "clip_name", te)):
+        with urllib.request.urlopen(server + "/object_info/" + node, timeout=30) as r:
+            avail = json.load(r)[node]["input"]["required"][key][0]
+        if fname not in avail:
+            problems.append("  %s: %s\n     vorhanden: %s" %
+                            (fname, "FEHLT auf dem Server", ", ".join(avail) or "(keine)"))
+    if problems:
+        raise SystemExit("Modell-Problem(e):\n" + "\n".join(problems))
+
 def load_source(src):
     """Liefert (Dateiname, Bytes) fuer lokale Dateien und http(s)-URLs, sonst (None, None)."""
     if src.startswith(("http://", "https://")):
@@ -114,20 +135,30 @@ def main():
                     help="Referenzbild: Dateipfad, Server-Dateiname oder http(s)-URL (mehrfach moeglich) -> Editing")
     ap.add_argument("--negative", default="")
     ap.add_argument("--server", default="http://127.0.0.1:8188")
-    ap.add_argument("--steps", type=int, default=4)
-    ap.add_argument("--cfg", type=float, default=1.0)
+    ap.add_argument("--profile", default="4b", choices=sorted(PROFILES),
+                    help="Modellprofil (4b/4b-base/9b/9b-base), setzt Modell+TE+Steps+CFG")
+    ap.add_argument("--steps", type=int, default=None,
+                    help="Sampling-Schritte (Default: 4 distilled, 20 base)")
+    ap.add_argument("--cfg", type=float, default=None,
+                    help="Guidance (Default: 1.0 distilled, 5.0 base)")
     ap.add_argument("--size", default="1024",
                     help="Zielgroesse: 1024 (quadratisch) oder 1280x720; beim Editing ist es die "
                          "MP-Obergrenze (1024 = 1 MP), das Seitenverhaeltis folgt dem Referenzbild")
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--sampler", default="euler")
-    ap.add_argument("--model", default=DEFAULTS["model"])
-    ap.add_argument("--te", default=DEFAULTS["te"])
-    ap.add_argument("--vae", default=DEFAULTS["vae"])
+    ap.add_argument("--model", default=None, help="ueberschreibt das DiT des Profils")
+    ap.add_argument("--te", default=None, help="ueberschreibt den Text-Encoder des Profils")
+    ap.add_argument("--vae", default=None, help="ueberschreibt den VAE des Profils")
     ap.add_argument("--prefix", default="flux2-klein")
     ap.add_argument("--timeout", type=int, default=600)
     p = ap.parse_args()
+    prof = PROFILES[p.profile]
+    p.model = p.model or prof["model"]
+    p.te = p.te or prof["te"]
+    p.vae = p.vae or prof["vae"]
+    p.steps = p.steps if p.steps is not None else prof["steps"]
+    p.cfg = p.cfg if p.cfg is not None else prof["cfg"]
     p.seed = p.seed if p.seed is not None else random.randrange(2 ** 48)
     if "x" in str(p.size).lower():
         p.w, p.h = (int(v) for v in str(p.size).lower().split("x"))
@@ -143,6 +174,7 @@ def main():
         print("Referenz: " + refs[-1])
 
     mode = "edit" if refs else "t2i"
+    preflight(p.server, p.model, p.te)
     graph = build_edit(p, refs) if refs else build_t2i(p)
     t0 = time.time()
     res = post_json(p.server + "/prompt", {"prompt": graph})
