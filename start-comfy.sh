@@ -128,6 +128,12 @@ if [ "$SEL" = "auto" ]; then
   ROW=$(gpu_table | awk -F", " -v min="$MIN_FREE_MB" \
           '$3 >= min {print $1 "|" $3 "|" $4}' | sort -t"|" -k2,2nr -k3,3nr | head -1)
   if [ -z "$ROW" ]; then
+    # frisch beendete Instanz: die VRAM-Meldung des Treibers kann hinterherhinken
+    sleep 3
+    ROW=$(gpu_table | awk -F", " -v min="$MIN_FREE_MB" \
+            '$3 >= min {print $1 "|" $3 "|" $4}' | sort -t"|" -k2,2nr -k3,3nr | head -1)
+  fi
+  if [ -z "$ROW" ]; then
     echo "FEHLER: keine GPU mit >= $((MIN_FREE_MB / 1024)) GB freiem VRAM:"
     gpu_table
     exit 1

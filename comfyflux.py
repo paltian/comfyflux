@@ -124,9 +124,12 @@ def pick_profile(server):
     except Exception:
         vram = 0
     avail = {}
-    for node, key in (("UNETLoader", "unet_name"), ("CLIPLoader", "clip_name")):
-        with urllib.request.urlopen(server + "/object_info/" + node, timeout=30) as r:
-            avail[key] = set(json.load(r)[node]["input"]["required"][key][0])
+    try:
+        for node, key in (("UNETLoader", "unet_name"), ("CLIPLoader", "clip_name")):
+            with urllib.request.urlopen(server + "/object_info/" + node, timeout=30) as r:
+                avail[key] = set(json.load(r)[node]["input"]["required"][key][0])
+    except Exception:
+        avail = {"unet_name": set(), "clip_name": set()}
     for name in ("9b", "4b"):
         prof = PROFILES[name]
         if prof["model"] in avail["unet_name"] and prof["te"] in avail["clip_name"]:
@@ -277,6 +280,12 @@ def main():
     ap.add_argument("--prefix", default="flux2-klein")
     ap.add_argument("--timeout", type=int, default=600)
     p = ap.parse_args()
+    try:
+        with urllib.request.urlopen(p.server + "/system_stats", timeout=10) as r:
+            r.read(1)
+    except Exception as e:
+        raise SystemExit("ComfyUI nicht erreichbar unter %s (%s)\n"
+                         "  Server starten mit: bash ~/dev/comfyflux/start-comfy.sh" % (p.server, e))
     if p.profile == "auto":
         p.profile, why = pick_profile(p.server)
         print("auto-Profil: %s (%s)" % (p.profile, why))
