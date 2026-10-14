@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
 """comfyflux.py - FLUX.2-Klein Text-to-Image UND Image-Editing gegen eine ComfyUI-Instanz.
 
+Zielgroesse = Basisgroesse x --scale (Default 1).  Bei Referenzen ist die Basis
+die Eingabe, bei t2i gilt --base-size.  Der --scale-mode bestimmt den Weg:
+
+  post-dit (post)      DiT rechnet in Basisgroesse, das Ergebnis wird mit dem
+                       KI-Upscaler vergroessert      -> schnell, treu
+  pre-dit (pre)        Referenz wird zuerst geupscaled, dann refine in Zielgroesse
+                                               -> treu + echte Details
+  dit (regen)          DiT generiert direkt in Zielgroesse  -> kreativ
+  upscale-no-dit (upscale)  kein DiT, reines KI-Upscaling   -> fuer vorhandene Bilder
+
 Beispiele:
   python3 comfyflux.py "ein Igel mit Partyhut" -o igel.png
-  python3 comfyflux.py "ein Igel mit Partyhut" --size 1280x720 -o breit.png
+  python3 comfyflux.py "ein Igel mit Partyhut" --base-size 1280x720 -o breit.png
   python3 comfyflux.py "change the party hat to blue" --image igel.png -o blau.png
-  python3 comfyflux.py "combine image1 and image2" --image igel.png --image https://example.com/foto.jpg
-  python3 comfyflux.py "nutze die Server-Referenz" --image lokal.png --server-image netz-test.png
-  python3 comfyflux.py "mehr Details, schaerfer" --image foto.png --scale 2 -o foto-2x.png
-  python3 comfyflux.py "sharpen, keep everything" --image foto.png --pre-upscale 2 -o scharf.png
-  python3 comfyflux.py "mit Workflow-Info fuer spaeter" --metadata -o archiv.png
-  python3 comfyflux.py "detailreiche Szene" --profile 9b -o gross.png
+  python3 comfyflux.py "mehr Details" --image foto.png --scale 4 -o foto-4x.png
+  python3 comfyflux.py "mehr Details" --image foto.png --scale 4 --scale-mode pre -o scharf.png
+  python3 comfyflux.py "vorhandenes Foto aufwerten" --image foto.png --scale 2 --scale-mode upscale
+  python3 comfyflux.py "combine image1 and image2" --image a.png --image https://example.com/b.jpg
+  python3 comfyflux.py "mit Workflow-Info" --metadata -o archiv.png
 """
 import argparse, json, os, random, struct, sys, time, urllib.error, urllib.parse, urllib.request
 
-# Modellprofile: name -> (DiT, Text-Encoder, VAE, steps, cfg)
-# Base-Varianten rechnen echtes CFG (2 Pae pro Schritt), Distilled ist auf
-# 4 Schritte/CFG 1 optimiert (siehe offizielle ComfyUI-Templates).
 UPSCALE_MODEL = "4x-UltraSharp.pth"
 
 PROFILES = {
@@ -30,8 +36,55 @@ PROFILES = {
                 "vae": "flux2-vae.safetensors", "steps": 20, "cfg": 5.0},
 }
 
-def build_t2i(p):
+# Lange und Kurzformen der Skalierungs-Modi
+MODE_ALIASES = {
+    "post-dit": "post-dit", "post": "post-dit",
+    "pre-dit": "pre-dit", "pre": "pre-dit",
+    "dit": "dit", "regen": "dit",
+    "upscale-no-dit": "upscale-no-dit", "upscale": "upscale-no-dit",
+}
+
+def target_dims(base_w, base_h, scale):
+    return (max(16, int(round(base_w * scale / 16.0)) * 16),
+            max(16, int(round(base_h * scale / 16.0)) * 16))
+
+def note_output(p, out_w, out_h, note):
+    p.out_wh = (out_w, out_h)
+    print("Ausgabe: %dx%d (%.2gx Basis, %.1f MP) [%s] %s" %
+          (out_w, out_h, p.scale, out_w * out_h / 1048576.0, p.scale_mode, note))
+    if out_w * out_h > 4_000_000:
+        print("Hinweis: >4 MP - das wird langsam und braucht VRAM.")
+
+def add_upscale_tail(g, p, src, target_w, target_h, save_node):
+    """KI-Upscaler + exakte Zielgroesse VOR den SaveImage-Knoten."""
+    g["40"] = {"class_type": "UpscaleModelLoader", "inputs": {"model_name": UPSCALE_MODEL}}
+    g["41"] = {"class_type": "ImageUpscaleWithModel",
+               "inputs": {"upscale_model": ["40", 0], "image": src}}
+    g["42"] = {"class_type": "ImageScaleToTotalPixels",
+               "inputs": {"image": ["41", 0], "upscale_method": "lanczos",
+                          "megapixels": round(target_w * target_h / 1048576.0, 3),
+                          "resolution_steps": 16}}
+    g[save_node]["inputs"]["images"] = ["42", 0]
+
+def build_upscale_only(p, ref_name, base_w, base_h):
+    tw, th = target_dims(base_w, base_h, p.scale)
+    note_output(p, tw, th, "(nur KI-Upscale, kein DiT)")
     return {
+        "1": {"class_type": "LoadImage", "inputs": {"image": ref_name}},
+        "2": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": UPSCALE_MODEL}},
+        "3": {"class_type": "ImageUpscaleWithModel",
+              "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
+        "4": {"class_type": "ImageScaleToTotalPixels",
+              "inputs": {"image": ["3", 0], "upscale_method": "lanczos",
+                         "megapixels": round(tw * th / 1048576.0, 3), "resolution_steps": 16}},
+        "5": {"class_type": "SaveImage", "inputs": {"images": ["4", 0], "filename_prefix": p.prefix}},
+    }
+
+def build_t2i(p):
+    tw, th = target_dims(p.w, p.h, p.scale)
+    post = p.scale_mode == "post-dit" and (tw, th) != (p.w, p.h)
+    gen_w, gen_h = (p.w, p.h) if post else (tw, th)
+    g = {
         "1":  {"class_type": "UNETLoader", "inputs": {"unet_name": p.model, "weight_dtype": "default"}},
         "2":  {"class_type": "CLIPLoader", "inputs": {"clip_name": p.te, "type": "flux2", "device": "default"}},
         "3":  {"class_type": "VAELoader", "inputs": {"vae_name": p.vae}},
@@ -41,42 +94,43 @@ def build_t2i(p):
         "7":  {"class_type": "CFGGuider", "inputs": {"model": ["1", 0], "positive": ["4", 0], "negative": ["6", 0], "cfg": p.cfg}},
         "8":  {"class_type": "RandomNoise", "inputs": {"noise_seed": p.seed}},
         "9":  {"class_type": "KSamplerSelect", "inputs": {"sampler_name": p.sampler}},
-        "10": {"class_type": "Flux2Scheduler", "inputs": {"steps": p.steps, "width": p.w, "height": p.h}},
-        "11": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": p.w, "height": p.h, "batch_size": p.batch}},
+        "10": {"class_type": "Flux2Scheduler", "inputs": {"steps": p.steps, "width": gen_w, "height": gen_h}},
+        "11": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": gen_w, "height": gen_h, "batch_size": p.batch}},
         "12": {"class_type": "SamplerCustomAdvanced", "inputs": {
                    "noise": ["8", 0], "guider": ["7", 0], "sampler": ["9", 0],
                    "sigmas": ["10", 0], "latent_image": ["11", 0]}},
         "13": {"class_type": "VAEDecode", "inputs": {"samples": ["12", 0], "vae": ["3", 0]}},
         "14": {"class_type": "SaveImage", "inputs": {"images": ["13", 0], "filename_prefix": p.prefix}},
     }
+    if post:
+        add_upscale_tail(g, p, ["13", 0], tw, th, "14")
+        note_output(p, tw, th, "DiT %dx%d + KI-Upscale" % (gen_w, gen_h))
+    else:
+        note_output(p, tw, th, "DiT in Zielgroesse" if (tw, th) != (p.w, p.h) else "")
+    return g
 
 def build_edit(p, refs, sizes=None):
-    budget_mp = round((p.w * p.h) / 1048576.0, 3)
     sizes = list(sizes or [])
-    scale_mode = p.scale is not None and bool(sizes and sizes[0])
-    if p.scale is not None and not scale_mode:
-        print("Hinweis: --scale ignoriert (Bildmasse der ersten Referenz nicht ermittelbar).")
+    base_known = bool(sizes and sizes[0])
+    bw, bh = sizes[0] if base_known else (p.w, p.h)
+    if not base_known:
+        print("Hinweis: Bildmasse nicht ermittelbar - Basis = --base-size.")
+    tw, th = target_dims(bw, bh, p.scale)
+    post = p.scale_mode == "post-dit" and (tw, th) != (bw, bh)
+    gen_w, gen_h = (bw, bh) if post else (tw, th)
+
     ref_mps = []
     for s in sizes:
-        if scale_mode and s:
-            target_mp = (s[0] * s[1]) * (p.scale ** 2) / 1048576.0
-            ref_mps.append(round(min(target_mp, 4.0), 3))
+        if s:
+            mp = (s[0] * s[1]) / 1048576.0
+            if p.scale_mode == "pre-dit":
+                mp = mp * p.scale ** 2
+            ref_mps.append(round(min(mp, 4.0), 3))
         else:
-            ref_mps.append(budget_mp)
+            ref_mps.append(round(min(gen_w * gen_h / 1048576.0, 4.0), 3))
     while len(ref_mps) < len(refs):
-        ref_mps.append(budget_mp)
-    if scale_mode:
-        w1, h1 = sizes[0]
-        out_w = max(16, int(round(w1 * p.scale / 16.0)) * 16)
-        out_h = max(16, int(round(h1 * p.scale / 16.0)) * 16)
-        size_in = {"width": out_w, "height": out_h}
-        p.out_wh = (out_w, out_h)
-        print("Ausgabe: %dx%d (%.2gx Eingabe, %.1f MP)" %
-              (out_w, out_h, p.scale, out_w * out_h / 1048576.0))
-        if out_w * out_h > 4_000_000:
-            print("Hinweis: >4 MP - das wird langsam und braucht VRAM.")
-    else:
-        size_in = {"width": ["140", 0], "height": ["140", 1]}
+        ref_mps.append(round(min(gen_w * gen_h / 1048576.0, 4.0), 3))
+
     g = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": p.model, "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": p.te, "type": "flux2", "device": "default"}},
@@ -86,37 +140,40 @@ def build_edit(p, refs, sizes=None):
         "6": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["5", 0]}},
         "21": {"class_type": "RandomNoise", "inputs": {"noise_seed": p.seed}},
         "22": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": p.sampler}},
-        "23": {"class_type": "Flux2Scheduler", "inputs": dict(size_in, steps=p.steps)},
-        "24": {"class_type": "EmptyFlux2LatentImage", "inputs": dict(size_in, batch_size=p.batch)},
+        "23": {"class_type": "Flux2Scheduler", "inputs": {"steps": p.steps, "width": gen_w, "height": gen_h}},
+        "24": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": gen_w, "height": gen_h, "batch_size": p.batch}},
         "25": {"class_type": "SamplerCustomAdvanced", "inputs": {
                    "noise": ["21", 0], "guider": ["20", 0], "sampler": ["22", 0],
                    "sigmas": ["23", 0], "latent_image": ["24", 0]}},
         "26": {"class_type": "VAEDecode", "inputs": {"samples": ["25", 0], "vae": ["3", 0]}},
         "27": {"class_type": "SaveImage", "inputs": {"images": ["26", 0], "filename_prefix": p.prefix}},
     }
-    if not scale_mode:
-        g["140"] = {"class_type": "GetImageSize", "inputs": {"image": ["110", 0]}}
-    if p.pre_upscale:
+    if p.scale_mode == "pre-dit":
         g["30"] = {"class_type": "UpscaleModelLoader", "inputs": {"model_name": UPSCALE_MODEL}}
     cond = ["4", 0]
     for i, name in enumerate(refs):
         lid, sid, eid, rid = 100 + i, 110 + i, 120 + i, 130 + i
         g[str(lid)] = {"class_type": "LoadImage", "inputs": {"image": name}}
         src = [str(lid), 0]
-        if p.pre_upscale:
+        if p.scale_mode == "pre-dit":
             uid = 150 + i
             g[str(uid)] = {"class_type": "ImageUpscaleWithModel",
                            "inputs": {"upscale_model": ["30", 0], "image": src}}
             src = [str(uid), 0]
         g[str(sid)] = {"class_type": "ImageScaleToTotalPixels",
                        "inputs": {"image": src,
-                                  "upscale_method": "lanczos" if p.pre_upscale else "nearest-exact",
+                                  "upscale_method": "lanczos" if p.scale_mode == "pre-dit" else "nearest-exact",
                                   "megapixels": ref_mps[i], "resolution_steps": 16}}
         g[str(eid)] = {"class_type": "VAEEncode", "inputs": {"pixels": [str(sid), 0], "vae": ["3", 0]}}
         g[str(rid)] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": cond, "latent": [str(eid), 0]}}
         cond = [str(rid), 0]
     g["20"] = {"class_type": "CFGGuider",
                "inputs": {"model": ["1", 0], "positive": cond, "negative": ["6", 0], "cfg": p.cfg}}
+    if post:
+        add_upscale_tail(g, p, ["26", 0], tw, th, "27")
+        note_output(p, tw, th, "DiT %dx%d + KI-Upscale" % (gen_w, gen_h))
+    else:
+        note_output(p, tw, th, "DiT in Zielgroesse" if (tw, th) != (bw, bh) else "Basisgroesse")
     return g
 
 def post_json(url, payload):
@@ -183,10 +240,14 @@ def widget_choices(val):
         return set(val[1].get("options", []))
     return set(v for v in val if isinstance(v, str) and v != "COMBO")
 
-def preflight(server, model, te, upscale=None):
+def preflight(server, model=None, te=None, upscale=None):
     """Prueft VOR dem Sampling, ob die Gewichte auf dem Server bekannt sind."""
     problems = []
-    checks = [("UNETLoader", "unet_name", model), ("CLIPLoader", "clip_name", te)]
+    checks = []
+    if model:
+        checks.append(("UNETLoader", "unet_name", model))
+    if te:
+        checks.append(("CLIPLoader", "clip_name", te))
     if upscale:
         checks.append(("UpscaleModelLoader", "model_name", upscale))
     for node, key, fname in checks:
@@ -208,6 +269,16 @@ class AddRef(argparse.Action):
         refs.append((self.KIND[option_string], values))
         namespace.refs = refs
 
+class Replaced(argparse.Action):
+    """Alte Flags freundlich zu ihrer Abloesung fuehren."""
+    HINT = {
+        "--size": "--base-size (t2i-Basis) und --scale (Zielfaktor)",
+        "--pre-upscale": "--scale N --scale-mode pre-dit",
+        "--post-upscale": "--scale N --scale-mode post-dit",
+    }
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        raise SystemExit("%s wurde ersetzt durch: %s" % (option_string, self.HINT[option_string]))
 
 def image_size(data):
     """(width, height) aus PNG/JPEG/GIF/BMP/WebP-Bytes, sonst None."""
@@ -313,17 +384,16 @@ def main():
                     help="Sampling-Schritte (Default: 8 distilled, 20 base)")
     ap.add_argument("--cfg", type=float, default=None,
                     help="Guidance (Default: 1.0 distilled, 5.0 base)")
-    ap.add_argument("--size", default="1024",
-                    help="Zielgroesse: 1024 (quadratisch) oder 1280x720; beim Editing ist es die "
-                         "MP-Obergrenze (1024 = 1 MP), das Seitenverhaeltis folgt dem Referenzbild")
+    ap.add_argument("--base-size", default="1024x1024", metavar="WxH",
+                    help="Basisgroesse fuer t2i ohne Eingabebild (Default: 1024x1024)")
+    ap.add_argument("--scale", type=float, default=1.0,
+                    help="Zielgroesse = Basisgroesse * Faktor (Default: 1)")
+    ap.add_argument("--scale-mode", default="post-dit", metavar="MODUS",
+                    help="post-dit (post, Default): DiT in Basisgroesse + KI-Upscale; "
+                         "pre-dit (pre): Referenz erst upscaled, dann Refine; "
+                         "dit (regen): DiT direkt in Zielgroesse; "
+                         "upscale-no-dit (upscale): nur KI-Upscale, kein DiT")
     ap.add_argument("--batch", type=int, default=1)
-    ap.add_argument("--scale", type=float, default=None,
-                    help="Ausgabe = Eingabebildgroesse * Faktor (z.B. 2 fuer 2x-Aufloesung "
-                         "zum Detail-Enhancement; braucht Referenzen)")
-    ap.add_argument("--pre-upscale", nargs="?", const="auto", default=None, metavar="FAKTOR",
-                    help="Referenzen vorab mit Upscaler-Modell vergroessern (Struktur bleibt "
-                         "erhalten), danach Refine-Pass; optional mit Ausgabefaktor "
-                         "(z.B. --pre-upscale 4), sonst als Schalter neben --scale")
     ap.add_argument("--metadata", action="store_true",
                     help="Workflow/Prompts in die PNG-Metadaten schreiben "
                          "(Standard: Metadaten werden entfernt)")
@@ -334,7 +404,21 @@ def main():
     ap.add_argument("--vae", default=None, help="ueberschreibt den VAE des Profils")
     ap.add_argument("--prefix", default="flux2-klein")
     ap.add_argument("--timeout", type=int, default=600)
+    # abgeloeste Flags
+    ap.add_argument("--size", nargs="?", const="1", default=None, action=Replaced, help=argparse.SUPPRESS)
+    ap.add_argument("--pre-upscale", nargs="?", const="1", default=None, action=Replaced, help=argparse.SUPPRESS)
+    ap.add_argument("--post-upscale", nargs="?", const="1", default=None, action=Replaced, help=argparse.SUPPRESS)
     p = ap.parse_args()
+
+    p.scale_mode = MODE_ALIASES.get(str(p.scale_mode).lower())
+    if p.scale_mode is None:
+        raise SystemExit("unbekannter --scale-mode. Erlaubt: post-dit (post), pre-dit (pre), "
+                         "dit (regen), upscale-no-dit (upscale)")
+    if p.scale <= 0:
+        raise SystemExit("--scale muss > 0 sein")
+    if p.scale <= 1 and p.scale_mode == "upscale-no-dit":
+        raise SystemExit("upscale-no-dit braucht --scale > 1")
+
     try:
         with urllib.request.urlopen(p.server + "/system_stats", timeout=10) as r:
             r.read(1)
@@ -351,32 +435,16 @@ def main():
     p.steps = p.steps if p.steps is not None else prof["steps"]
     p.cfg = p.cfg if p.cfg is not None else prof["cfg"]
     p.seed = p.seed if p.seed is not None else random.randrange(2 ** 48)
-    if "x" in str(p.size).lower():
-        p.w, p.h = (int(v) for v in str(p.size).lower().split("x"))
+    if "x" in str(p.base_size).lower():
+        p.w, p.h = (int(v) for v in str(p.base_size).lower().split("x"))
     else:
-        p.w = p.h = int(p.size)
+        p.w = p.h = int(p.base_size)
     p.w -= p.w % 16
     p.h -= p.h % 16
 
-    if p.scale is not None and not (p.refs or []):
-        raise SystemExit("--scale braucht mindestens eine Referenz (--image/--url/--server-image)")
-    if p.pre_upscale is not None:
-        if p.pre_upscale != "auto":
-            try:
-                factor = float(p.pre_upscale)
-            except ValueError:
-                raise SystemExit("--pre-upscale erwartet einen Faktor (z.B. 4) oder nichts, bekam: %s"
-                                 % p.pre_upscale)
-            if p.scale is None:
-                p.scale = factor
-            elif abs(p.scale - factor) > 1e-9:
-                raise SystemExit("--pre-upscale %g passt nicht zu --scale %g (nur eines angeben)"
-                                 % (factor, p.scale))
-        if p.scale is None:
-            raise SystemExit("--pre-upscale braucht --scale oder einen Faktor (z.B. --pre-upscale 4)")
-        p.pre_upscale = True
-    if p.scale is not None and not (p.refs or []):
-        raise SystemExit("--scale braucht mindestens eine Referenz (--image/--url/--server-image)")
+    if p.scale_mode in ("pre-dit", "upscale-no-dit") and not (p.refs or []):
+        raise SystemExit("%s braucht mindestens eine Referenz (--image/--url/--server-image)"
+                         % p.scale_mode)
     refs = []
     sizes = []
     for kind, value in (p.refs or []):
@@ -392,9 +460,19 @@ def main():
             refs.append(value)
         print("Referenz: " + refs[-1])
 
+    if p.scale_mode == "upscale-no-dit":
+        if len(refs) > 1:
+            print("Hinweis: upscale-no-dit nutzt nur image1 (%d Referenzen angegeben)." % len(refs))
+        preflight(p.server, upscale=UPSCALE_MODEL)
+        bw, bh = sizes[0] if (sizes and sizes[0]) else (p.w, p.h)
+        graph = build_upscale_only(p, refs[0], bw, bh)
+    else:
+        preflight(p.server, p.model, p.te,
+                  UPSCALE_MODEL if (p.scale_mode == "pre-dit" or
+                                    (p.scale_mode == "post-dit" and p.scale != 1)) else None)
+        graph = build_edit(p, refs, sizes) if refs else build_t2i(p)
+
     mode = "edit" if refs else "t2i"
-    preflight(p.server, p.model, p.te, UPSCALE_MODEL if p.pre_upscale else None)
-    graph = build_edit(p, refs, sizes) if refs else build_t2i(p)
     t0 = time.time()
     res = post_json(p.server + "/prompt", {"prompt": graph})
     if "prompt_id" not in res:

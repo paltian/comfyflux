@@ -8,8 +8,9 @@ instance. No browser, no node graph — prompt in, PNG out.
 # text-to-image
 python3 comfyflux.py "a hedgehog wearing a tiny party hat, flash photography" -o igel.png
 
-# custom resolution (width x height, rounded to multiples of 16)
-python3 comfyflux.py "..." --size 1280x720 -o breit.png
+# target size: base-size x scale (default scale 1, base 1024x1024)
+python3 comfyflux.py "..." --base-size 1280x720 -o breit.png
+python3 comfyflux.py "..." --base-size 512 --scale 3 -o gross.png
 
 # image editing: reference image + change request
 python3 comfyflux.py "change the party hat to bright blue" --image igel.png -o blau.png
@@ -64,7 +65,7 @@ python3 comfyflux.py "..." --model flux-2-klein-base-4b-fp8.safetensors --cfg 5 
 |---|---|---|
 | `prompt` | — | text-to-image prompt, or change request when editing |
 | `--profile` | `auto` | `auto` picks the largest profile whose weights are installed and that fits the server GPU (9b needs ≥15 GB VRAM); or `4b`, `4b-base`, `9b`, `9b-base` explicitly |
-| `--size` | `1024` | `1024` (square) or `BxH` (e.g. `1280x720`); in edit mode it is the megapixel cap |
+| `--base-size` | `1024x1024` | base canvas for t2i (`WxH` or square); for editing the input image is the base |
 | `--steps` | `8` / `20` | sampling steps (8 distilled, 20 base) |
 | `--image` | — | reference image: local file **or** http(s) URL, repeatable → editing mode |
 | `--url` | — | alias for `--image`, explicitly a URL |
@@ -74,8 +75,8 @@ All reference flags share one order: `image1..imageN` follow the command line.
 | `--cfg` | `1.0` / `5.0` | guidance scale (1 distilled, 5 base) |
 | `--negative` | — | negative prompt |
 | `--seed` | random | reproducibility |
-| `--scale` | — | output = input size × factor (e.g. `2` for 2× resolution detail enhancement; needs references) |
-| `--pre-upscale` | — | upscale references with an upscale model first (structure preserved), then refine; optional factor (e.g. `--pre-upscale 4`) or switch alongside `--scale` |
+| `--scale` | `1` | target size = base × factor (1 = unchanged) |
+| `--scale-mode` | `post-dit` | how scaling happens — see below |
 | `--metadata` | — | keep workflow/prompt metadata in output PNGs (default: stripped clean) |
 | `--batch` | `1` | images per run |
 | `--sampler` | `euler` | sampler selection |
@@ -84,6 +85,18 @@ All reference flags share one order: `image1..imageN` follow the command line.
 | `-o`, `--prefix`, `--timeout` | — | output file, filename prefix, run limit |
 
 Resolutions are rounded down to multiples of 16 (VAE factor 8, patch size 2).
+
+## Scaling modes
+
+Target size is always `base × --scale`. The mode decides how to get there
+(long form / short alias):
+
+| Mode | What happens | Cost at scale 4 | Character |
+|---|---|---|---|
+| `post-dit` (`post`) | DiT at base size, then AI-upscale the result | ~12 s | fast, faithful (default) |
+| `pre-dit` (`pre`) | upscale references first, then refine at target size | ~28 s | faithful + real detail |
+| `dit` (`regen`) | DiT generates directly at target size | ~25 s | creative, identity may drift |
+| `upscale-no-dit` (`upscale`) | no DiT, pure AI upscaling of the input | ~2 s | for existing images |
 In editing mode the output keeps the reference image's aspect ratio.
 
 ## Server scripts
