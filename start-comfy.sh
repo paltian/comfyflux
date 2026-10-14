@@ -32,7 +32,8 @@ gpus() {
     --format=csv,noheader,nounits > "$tmp1"
   nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory \
     --format=csv,noheader,nounits > "$tmp2"
-  awk -F", " '
+  echo "Idx  PCI-Bus   VRAM benutzt/frei/gesamt   PCIe      Belegt durch"
+  LC_ALL=C awk -F", " '
     NR == FNR {
       if (NF < 4) next
       name = $3; sub(".*/", "", name)
@@ -40,8 +41,9 @@ gpus() {
       next
     }
     {
-      printf "%-3s %-12s %5.1f/%5.1f/%5.1f GB   x%-2s Gen%-1s   %s\n", \
-        $1, substr($3, 1, 12), $5 / 1024, $6 / 1024, $7 / 1024, $8, $9, (procs[$2] ? procs[$2] : "-")
+      n = split($3, bus, ":"); busid = bus[n - 1] ":" bus[n]
+      printf "%-3s %-9s %5.1f/%5.1f/%5.1f GB   x%-2s Gen%-1s   %s\n", \
+        $1, busid, $5 / 1024, $6 / 1024, $7 / 1024, $8, $9, (procs[$2] ? procs[$2] : "-")
     }
   ' "$tmp2" "$tmp1"
   rm -f "$tmp1" "$tmp2"
