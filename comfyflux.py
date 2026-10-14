@@ -8,7 +8,7 @@ Beispiele:
   python3 comfyflux.py "combine image1 and image2" --image igel.png --image https://example.com/foto.jpg
   python3 comfyflux.py "nutze die Server-Referenz" --image lokal.png --server-image netz-test.png
   python3 comfyflux.py "mehr Details, schaerfer" --image foto.png --scale 2 -o foto-2x.png
-  python3 comfyflux.py "sharpen, keep everything" --image foto.png --scale 2 --pre-upscale -o scharf.png
+  python3 comfyflux.py "sharpen, keep everything" --image foto.png --pre-upscale 2 -o scharf.png
   python3 comfyflux.py "mit Workflow-Info fuer spaeter" --metadata -o archiv.png
   python3 comfyflux.py "detailreiche Szene" --profile 9b -o gross.png
 """
@@ -320,9 +320,10 @@ def main():
     ap.add_argument("--scale", type=float, default=None,
                     help="Ausgabe = Eingabebildgroesse * Faktor (z.B. 2 fuer 2x-Aufloesung "
                          "zum Detail-Enhancement; braucht Referenzen)")
-    ap.add_argument("--pre-upscale", action="store_true",
+    ap.add_argument("--pre-upscale", nargs="?", const="auto", default=None, metavar="FAKTOR",
                     help="Referenzen vorab mit Upscaler-Modell vergroessern (Struktur bleibt "
-                         "erhalten), danach Refine-Pass; braucht --scale")
+                         "erhalten), danach Refine-Pass; optional mit Ausgabefaktor "
+                         "(z.B. --pre-upscale 4), sonst als Schalter neben --scale")
     ap.add_argument("--metadata", action="store_true",
                     help="Workflow/Prompts in die PNG-Metadaten schreiben "
                          "(Standard: Metadaten werden entfernt)")
@@ -359,8 +360,23 @@ def main():
 
     if p.scale is not None and not (p.refs or []):
         raise SystemExit("--scale braucht mindestens eine Referenz (--image/--url/--server-image)")
-    if p.pre_upscale and p.scale is None:
-        raise SystemExit("--pre-upscale braucht --scale (Faktor zur Eingabegroesse)")
+    if p.pre_upscale is not None:
+        if p.pre_upscale != "auto":
+            try:
+                factor = float(p.pre_upscale)
+            except ValueError:
+                raise SystemExit("--pre-upscale erwartet einen Faktor (z.B. 4) oder nichts, bekam: %s"
+                                 % p.pre_upscale)
+            if p.scale is None:
+                p.scale = factor
+            elif abs(p.scale - factor) > 1e-9:
+                raise SystemExit("--pre-upscale %g passt nicht zu --scale %g (nur eines angeben)"
+                                 % (factor, p.scale))
+        if p.scale is None:
+            raise SystemExit("--pre-upscale braucht --scale oder einen Faktor (z.B. --pre-upscale 4)")
+        p.pre_upscale = True
+    if p.scale is not None and not (p.refs or []):
+        raise SystemExit("--scale braucht mindestens eine Referenz (--image/--url/--server-image)")
     refs = []
     sizes = []
     for kind, value in (p.refs or []):
