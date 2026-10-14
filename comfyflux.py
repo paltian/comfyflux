@@ -8,6 +8,7 @@ Beispiele:
   python3 comfyflux.py "combine image1 and image2" --image igel.png --image https://example.com/foto.jpg
   python3 comfyflux.py "nutze die Server-Referenz" --image lokal.png --server-image netz-test.png
   python3 comfyflux.py "mehr Details, schaerfer" --image foto.png --scale 2 -o foto-2x.png
+  python3 comfyflux.py "sharpen, keep everything" --image foto.png --scale 2 --pre-upscale -o scharf.png
   python3 comfyflux.py "detailreiche Szene" --profile 9b -o gross.png
 """
 import argparse, json, os, random, struct, sys, time, urllib.error, urllib.parse, urllib.request
@@ -15,6 +16,8 @@ import argparse, json, os, random, struct, sys, time, urllib.error, urllib.parse
 # Modellprofile: name -> (DiT, Text-Encoder, VAE, steps, cfg)
 # Base-Varianten rechnen echtes CFG (2 Pae pro Schritt), Distilled ist auf
 # 4 Schritte/CFG 1 optimiert (siehe offizielle ComfyUI-Templates).
+UPSCALE_MODEL = "4x-UltraSharp.pth"
+
 PROFILES = {
     "4b":      {"model": "flux-2-klein-4b-fp8.safetensors",      "te": "qwen_3_4b_fp4_flux2.safetensors",
                 "vae": "flux2-vae.safetensors", "steps": 8,  "cfg": 1.0},
@@ -55,7 +58,8 @@ def build_edit(p, refs, sizes=None):
     ref_mps = []
     for s in sizes:
         if scale_mode and s:
-            ref_mps.append(round(min((s[0] * s[1]) / 1048576.0, 4.0), 3))
+            target_mp = (s[0] * s[1]) * (p.scale ** 2) / 1048576.0
+            ref_mps.append(round(min(target_mp, 4.0), 3))
         else:
             ref_mps.append(budget_mp)
     while len(ref_mps) < len(refs):
@@ -91,12 +95,21 @@ def build_edit(p, refs, sizes=None):
     }
     if not scale_mode:
         g["140"] = {"class_type": "GetImageSize", "inputs": {"image": ["110", 0]}}
+    if p.pre_upscale:
+        g["30"] = {"class_type": "UpscaleModelLoader", "inputs": {"model_name": UPSCALE_MODEL}}
     cond = ["4", 0]
     for i, name in enumerate(refs):
         lid, sid, eid, rid = 100 + i, 110 + i, 120 + i, 130 + i
         g[str(lid)] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        src = [str(lid), 0]
+        if p.pre_upscale:
+            uid = 150 + i
+            g[str(uid)] = {"class_type": "ImageUpscaleWithModel",
+                           "inputs": {"upscale_model": ["30", 0], "image": src}}
+            src = [str(uid), 0]
         g[str(sid)] = {"class_type": "ImageScaleToTotalPixels",
-                       "inputs": {"image": [str(lid), 0], "upscale_method": "nearest-exact",
+                       "inputs": {"image": src,
+                                  "upscale_method": "lanczos" if p.pre_upscale else "nearest-exact",
                                   "megapixels": ref_mps[i], "resolution_steps": 16}}
         g[str(eid)] = {"class_type": "VAEEncode", "inputs": {"pixels": [str(sid), 0], "vae": ["3", 0]}}
         g[str(rid)] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": cond, "latent": [str(eid), 0]}}
@@ -138,10 +151,13 @@ def pick_profile(server):
             return name, "GPU %.1f GB VRAM, Gewichte vorhanden" % (vram / 1e9)
     return "4b", "Fallback (Gewichte/VRAM unvollstaendig)"
 
-def preflight(server, model, te):
+def preflight(server, model, te, upscale=None):
     """Prueft VOR dem Sampling, ob die Gewichte auf dem Server bekannt sind."""
     problems = []
-    for node, key, fname in (("UNETLoader", "unet_name", model), ("CLIPLoader", "clip_name", te)):
+    checks = [("UNETLoader", "unet_name", model), ("CLIPLoader", "clip_name", te)]
+    if upscale:
+        checks.append(("UpscaleModelLoader", "model_name", upscale))
+    for node, key, fname in checks:
         with urllib.request.urlopen(server + "/object_info/" + node, timeout=30) as r:
             avail = json.load(r)[node]["input"]["required"][key][0]
         if fname not in avail:
@@ -272,6 +288,9 @@ def main():
     ap.add_argument("--scale", type=float, default=None,
                     help="Ausgabe = Eingabebildgroesse * Faktor (z.B. 2 fuer 2x-Aufloesung "
                          "zum Detail-Enhancement; braucht Referenzen)")
+    ap.add_argument("--pre-upscale", action="store_true",
+                    help="Referenzen vorab mit Upscaler-Modell vergroessern (Struktur bleibt "
+                         "erhalten), danach Refine-Pass; braucht --scale")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--sampler", default="euler")
     ap.add_argument("--model", default=None, help="ueberschreibt das DiT des Profils")
@@ -305,6 +324,8 @@ def main():
 
     if p.scale is not None and not (p.refs or []):
         raise SystemExit("--scale braucht mindestens eine Referenz (--image/--url/--server-image)")
+    if p.pre_upscale and p.scale is None:
+        raise SystemExit("--pre-upscale braucht --scale (Faktor zur Eingabegroesse)")
     refs = []
     sizes = []
     for kind, value in (p.refs or []):
@@ -321,7 +342,7 @@ def main():
         print("Referenz: " + refs[-1])
 
     mode = "edit" if refs else "t2i"
-    preflight(p.server, p.model, p.te)
+    preflight(p.server, p.model, p.te, UPSCALE_MODEL if p.pre_upscale else None)
     graph = build_edit(p, refs, sizes) if refs else build_t2i(p)
     t0 = time.time()
     res = post_json(p.server + "/prompt", {"prompt": graph})
@@ -360,7 +381,8 @@ def main():
         with urllib.request.urlopen(p.server + "/view?" + q, timeout=120) as r, open(dest, "wb") as f:
             f.write(r.read())
         saved.append(dest)
-    print("fertig in %.1fs -> %s" % (time.time() - t0, ", ".join(saved)))
+    print("fertig in %.1fs -> %s  [seed=%d | reproduzieren: --seed %d]" %
+          (time.time() - t0, ", ".join(saved), p.seed, p.seed))
 
 if __name__ == "__main__":
     main()
