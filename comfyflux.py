@@ -65,6 +65,7 @@ def build_edit(p, refs, sizes=None):
         out_w = max(16, int(round(w1 * p.scale / 16.0)) * 16)
         out_h = max(16, int(round(h1 * p.scale / 16.0)) * 16)
         size_in = {"width": out_w, "height": out_h}
+        p.out_wh = (out_w, out_h)
         print("Ausgabe: %dx%d (%.2gx Eingabe, %.1f MP)" %
               (out_w, out_h, p.scale, out_w * out_h / 1048576.0))
         if out_w * out_h > 4_000_000:
@@ -318,8 +319,9 @@ def main():
     if "prompt_id" not in res:
         sys.exit("Server-Fehler: " + json.dumps(res)[:500])
     pid = res["prompt_id"]
+    ow, oh = getattr(p, "out_wh", (p.w, p.h))
     print("prompt_id=%s seed=%d %dx%d [%s] modus=%s ..." %
-          (pid, p.seed, p.w, p.h, p.profile, mode), flush=True)
+          (pid, p.seed, ow, oh, p.profile, mode), flush=True)
 
     hist = {}
     while time.time() - t0 < p.timeout:
