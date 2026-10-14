@@ -195,7 +195,13 @@ def main():
     refs = []
     for img in (p.image or []):
         name, data = load_source(img)
-        refs.append(upload_image(p.server, name, data) if data is not None else img)
+        if data is not None:
+            # laufende Nummer: gleiche Basenamen (z.B. zwei URLs ohne Endung)
+            # wuerden sich beim Upload sonst gegenseitig ueberschreiben
+            name = "ref%d-%s" % (len(refs) + 1, name)
+            refs.append(upload_image(p.server, name, data))
+        else:
+            refs.append(img)
         print("Referenz: " + refs[-1])
 
     mode = "edit" if refs else "t2i"
