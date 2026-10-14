@@ -75,12 +75,16 @@ In editing mode the output keeps the reference image's aspect ratio.
 (paths in `start-comfy.sh` point to `~/dev/comfyui` + `~/models/comfyui`):
 
 ```bash
-bash ~/dev/comfyflux/start-comfy.sh   # GPU + model paths configured, background
-bash ~/dev/comfyflux/stop-comfy.sh    # graceful stop (SIGTERM, then SIGKILL)
+bash start-comfy.sh          # auto: GPU with the most free VRAM
+bash start-comfy.sh 1        # explicit nvidia-smi index
+bash start-comfy.sh status   # running? on which GPU? how much VRAM?
+bash stop-comfy.sh           # graceful stop (SIGTERM, then SIGKILL)
 ```
 
-The start script pins the instance to one GPU via `CUDA_DEVICE_ORDER=PCI_BUS_ID`
-and `CUDA_VISIBLE_DEVICES` and loads `extra-model-paths.yaml` explicitly.
+GPU selection: `auto` picks the GPU with the most free VRAM (tie-break: largest
+total VRAM) and refuses cards below 8 GB free; an explicit index only warns.
+The instance is pinned to one GPU via `CUDA_DEVICE_ORDER=PCI_BUS_ID` +
+`CUDA_VISIBLE_DEVICES` and loads `extra-model-paths.yaml` explicitly.
 
 ## Shell alias
 
