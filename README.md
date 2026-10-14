@@ -74,6 +74,7 @@ All reference flags share one order: `image1..imageN` follow the command line.
 | `--cfg` | `1.0` / `5.0` | guidance scale (1 distilled, 5 base) |
 | `--negative` | — | negative prompt |
 | `--seed` | random | reproducibility |
+| `--scale` | — | output = input size × factor (e.g. `2` for 2× resolution detail enhancement; needs references) |
 | `--batch` | `1` | images per run |
 | `--sampler` | `euler` | sampler selection |
 | `--model/--te/--vae` | from profile | override individual checkpoints |

@@ -7,9 +7,10 @@ Beispiele:
   python3 comfyflux.py "change the party hat to blue" --image igel.png -o blau.png
   python3 comfyflux.py "combine image1 and image2" --image igel.png --image https://example.com/foto.jpg
   python3 comfyflux.py "nutze die Server-Referenz" --image lokal.png --server-image netz-test.png
+  python3 comfyflux.py "mehr Details, schaerfer" --image foto.png --scale 2 -o foto-2x.png
   python3 comfyflux.py "detailreiche Szene" --profile 9b -o gross.png
 """
-import argparse, json, os, random, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse, json, os, random, struct, sys, time, urllib.error, urllib.parse, urllib.request
 
 # Modellprofile: name -> (DiT, Text-Encoder, VAE, steps, cfg)
 # Base-Varianten rechnen echtes CFG (2 Pae pro Schritt), Distilled ist auf
@@ -45,7 +46,31 @@ def build_t2i(p):
         "14": {"class_type": "SaveImage", "inputs": {"images": ["13", 0], "filename_prefix": p.prefix}},
     }
 
-def build_edit(p, refs):
+def build_edit(p, refs, sizes=None):
+    budget_mp = round((p.w * p.h) / 1048576.0, 3)
+    sizes = list(sizes or [])
+    scale_mode = p.scale is not None and bool(sizes and sizes[0])
+    if p.scale is not None and not scale_mode:
+        print("Hinweis: --scale ignoriert (Bildmasse der ersten Referenz nicht ermittelbar).")
+    ref_mps = []
+    for s in sizes:
+        if scale_mode and s:
+            ref_mps.append(round(min((s[0] * s[1]) / 1048576.0, 4.0), 3))
+        else:
+            ref_mps.append(budget_mp)
+    while len(ref_mps) < len(refs):
+        ref_mps.append(budget_mp)
+    if scale_mode:
+        w1, h1 = sizes[0]
+        out_w = max(16, int(round(w1 * p.scale / 16.0)) * 16)
+        out_h = max(16, int(round(h1 * p.scale / 16.0)) * 16)
+        size_in = {"width": out_w, "height": out_h}
+        print("Ausgabe: %dx%d (%.2gx Eingabe, %.1f MP)" %
+              (out_w, out_h, p.scale, out_w * out_h / 1048576.0))
+        if out_w * out_h > 4_000_000:
+            print("Hinweis: >4 MP - das wird langsam und braucht VRAM.")
+    else:
+        size_in = {"width": ["140", 0], "height": ["140", 1]}
     g = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": p.model, "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": p.te, "type": "flux2", "device": "default"}},
@@ -55,23 +80,23 @@ def build_edit(p, refs):
         "6": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["5", 0]}},
         "21": {"class_type": "RandomNoise", "inputs": {"noise_seed": p.seed}},
         "22": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": p.sampler}},
-        "23": {"class_type": "Flux2Scheduler", "inputs": {"steps": p.steps, "width": ["140", 0], "height": ["140", 1]}},
-        "24": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": ["140", 0], "height": ["140", 1], "batch_size": p.batch}},
+        "23": {"class_type": "Flux2Scheduler", "inputs": dict(size_in, steps=p.steps)},
+        "24": {"class_type": "EmptyFlux2LatentImage", "inputs": dict(size_in, batch_size=p.batch)},
         "25": {"class_type": "SamplerCustomAdvanced", "inputs": {
                    "noise": ["21", 0], "guider": ["20", 0], "sampler": ["22", 0],
                    "sigmas": ["23", 0], "latent_image": ["24", 0]}},
         "26": {"class_type": "VAEDecode", "inputs": {"samples": ["25", 0], "vae": ["3", 0]}},
         "27": {"class_type": "SaveImage", "inputs": {"images": ["26", 0], "filename_prefix": p.prefix}},
-        "140": {"class_type": "GetImageSize", "inputs": {"image": ["110", 0]}},
     }
-    mp = round((p.w * p.h) / 1048576.0, 3)
+    if not scale_mode:
+        g["140"] = {"class_type": "GetImageSize", "inputs": {"image": ["110", 0]}}
     cond = ["4", 0]
     for i, name in enumerate(refs):
         lid, sid, eid, rid = 100 + i, 110 + i, 120 + i, 130 + i
         g[str(lid)] = {"class_type": "LoadImage", "inputs": {"image": name}}
         g[str(sid)] = {"class_type": "ImageScaleToTotalPixels",
                        "inputs": {"image": [str(lid), 0], "upscale_method": "nearest-exact",
-                                  "megapixels": mp, "resolution_steps": 16}}
+                                  "megapixels": ref_mps[i], "resolution_steps": 16}}
         g[str(eid)] = {"class_type": "VAEEncode", "inputs": {"pixels": [str(sid), 0], "vae": ["3", 0]}}
         g[str(rid)] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": cond, "latent": [str(eid), 0]}}
         cond = [str(rid), 0]
@@ -131,6 +156,52 @@ class AddRef(argparse.Action):
         refs.append((self.KIND[option_string], values))
         namespace.refs = refs
 
+
+def image_size(data):
+    """(width, height) aus PNG/JPEG/GIF/BMP/WebP-Bytes, sonst None."""
+    try:
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return struct.unpack(">II", data[16:24])
+        if data[:3] == b"\xff\xd8\xff":
+            i = 2
+            while i < len(data) - 9:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                m = data[i + 1]
+                if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                    return w, h
+                i += 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+            return None
+        if data[:4] == b"GIF8":
+            return struct.unpack("<HH", data[6:10])
+        if data[:2] == b"BM":
+            w, h = struct.unpack("<ii", data[18:26])
+            return w, abs(h)
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            if data[12:16] == b"VP8X":
+                return (int.from_bytes(data[24:27], "little") + 1,
+                        int.from_bytes(data[27:30], "little") + 1)
+            if data[12:16] == b"VP8L":
+                bits = struct.unpack("<I", data[21:25])[0]
+                return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+            if data[12:16] == b"VP8 ":
+                w, h = struct.unpack("<HH", data[26:30])
+                return w & 0x3FFF, h & 0x3FFF
+    except Exception:
+        pass
+    return None
+
+def download_input(server, name):
+    """Holt ein Bild aus ComfyUIs input-Ordner (fuer Groessenbestimmung)."""
+    q = urllib.parse.urlencode({"filename": os.path.basename(name),
+                                "subfolder": os.path.dirname(name), "type": "input"})
+    try:
+        with urllib.request.urlopen(server + "/view?" + q, timeout=60) as r:
+            return r.read()
+    except Exception:
+        return None
 
 def fetch_ref(kind, value, server):
     """Liefert (Upload-Name, Bytes) fuer lokale/URL-Quellen, (None, Name) fuer
@@ -194,6 +265,9 @@ def main():
                     help="Zielgroesse: 1024 (quadratisch) oder 1280x720; beim Editing ist es die "
                          "MP-Obergrenze (1024 = 1 MP), das Seitenverhaeltis folgt dem Referenzbild")
     ap.add_argument("--batch", type=int, default=1)
+    ap.add_argument("--scale", type=float, default=None,
+                    help="Ausgabe = Eingabebildgroesse * Faktor (z.B. 2 fuer 2x-Aufloesung "
+                         "zum Detail-Enhancement; braucht Referenzen)")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--sampler", default="euler")
     ap.add_argument("--model", default=None, help="ueberschreibt das DiT des Profils")
@@ -219,21 +293,26 @@ def main():
     p.w -= p.w % 16
     p.h -= p.h % 16
 
+    if p.scale is not None and not (p.refs or []):
+        raise SystemExit("--scale braucht mindestens eine Referenz (--image/--url/--server-image)")
     refs = []
+    sizes = []
     for kind, value in (p.refs or []):
         name, data = fetch_ref(kind, value, p.server)
         if name is not None:
             # laufende Nummer: gleiche Basenamen (z.B. zwei URLs ohne Endung)
             # wuerden sich beim Upload sonst gegenseitig ueberschreiben
             name = "ref%d-%s" % (len(refs) + 1, name)
+            sizes.append(image_size(data))
             refs.append(upload_image(p.server, name, data))
         else:
+            sizes.append(image_size(download_input(p.server, value) or b""))
             refs.append(value)
         print("Referenz: " + refs[-1])
 
     mode = "edit" if refs else "t2i"
     preflight(p.server, p.model, p.te)
-    graph = build_edit(p, refs) if refs else build_t2i(p)
+    graph = build_edit(p, refs, sizes) if refs else build_t2i(p)
     t0 = time.time()
     res = post_json(p.server + "/prompt", {"prompt": graph})
     if "prompt_id" not in res:
