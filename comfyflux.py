@@ -6,7 +6,7 @@ Beispiele:
   python3 comfyflux.py "ein Igel mit Partyhut" --size 1280x720 -o breit.png
   python3 comfyflux.py "change the party hat to blue" --image igel.png -o blau.png
 """
-import argparse, json, os, random, sys, time, urllib.parse, urllib.request
+import argparse, json, os, random, sys, time, urllib.error, urllib.parse, urllib.request
 
 DEFAULTS = {
     "model": "flux-2-klein-4b-fp8.safetensors",
@@ -59,7 +59,8 @@ def build_edit(p, refs):
         lid, sid, eid, rid = 100 + i, 110 + i, 120 + i, 130 + i
         g[str(lid)] = {"class_type": "LoadImage", "inputs": {"image": name}}
         g[str(sid)] = {"class_type": "ImageScaleToTotalPixels",
-                       "inputs": {"image": [str(lid), 0], "upscale_method": "nearest-exact", "megapixels": mp}}
+                       "inputs": {"image": [str(lid), 0], "upscale_method": "nearest-exact",
+                                  "megapixels": mp, "resolution_steps": 16}}
         g[str(eid)] = {"class_type": "VAEEncode", "inputs": {"pixels": [str(sid), 0], "vae": ["3", 0]}}
         g[str(rid)] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": cond, "latent": [str(eid), 0]}}
         cond = [str(rid), 0]
@@ -70,8 +71,11 @@ def build_edit(p, refs):
 def post_json(url, payload):
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        raise SystemExit("Server-Fehler HTTP %s: %s" % (e.code, e.read().decode()[:800]))
 
 def upload_image(server, path):
     boundary = "----comfyflux" + str(random.randrange(10 ** 12))
