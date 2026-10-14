@@ -65,7 +65,7 @@ python3 comfyflux.py "..." --model flux-2-klein-base-4b-fp8.safetensors --cfg 5 
 | `prompt` | — | text-to-image prompt, or change request when editing |
 | `--profile` | `auto` | `auto` picks the largest profile whose weights are installed and that fits the server GPU (9b needs ≥15 GB VRAM); or `4b`, `4b-base`, `9b`, `9b-base` explicitly |
 | `--size` | `1024` | `1024` (square) or `BxH` (e.g. `1280x720`); in edit mode it is the megapixel cap |
-| `--steps` | `4` / `20` | sampling steps (4 distilled, 20 base) |
+| `--steps` | `8` / `20` | sampling steps (8 distilled, 20 base) |
 | `--image` | — | reference image: local file **or** http(s) URL, repeatable → editing mode |
 | `--url` | — | alias for `--image`, explicitly a URL |
 | `--server-image` | — | reference by filename already in ComfyUI's input folder (no upload) |

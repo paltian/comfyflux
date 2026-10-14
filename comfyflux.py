@@ -16,11 +16,11 @@ import argparse, json, os, random, sys, time, urllib.error, urllib.parse, urllib
 # 4 Schritte/CFG 1 optimiert (siehe offizielle ComfyUI-Templates).
 PROFILES = {
     "4b":      {"model": "flux-2-klein-4b-fp8.safetensors",      "te": "qwen_3_4b_fp4_flux2.safetensors",
-                "vae": "flux2-vae.safetensors", "steps": 4,  "cfg": 1.0},
+                "vae": "flux2-vae.safetensors", "steps": 8,  "cfg": 1.0},
     "4b-base": {"model": "flux-2-klein-base-4b-fp8.safetensors", "te": "qwen_3_4b_fp4_flux2.safetensors",
                 "vae": "flux2-vae.safetensors", "steps": 20, "cfg": 5.0},
     "9b":      {"model": "flux-2-klein-9b-fp8.safetensors",      "te": "qwen_3_8b_fp4mixed.safetensors",
-                "vae": "flux2-vae.safetensors", "steps": 4,  "cfg": 1.0},
+                "vae": "flux2-vae.safetensors", "steps": 8,  "cfg": 1.0},
     "9b-base": {"model": "flux-2-klein-base-9b-fp8.safetensors", "te": "qwen_3_8b_fp4mixed.safetensors",
                 "vae": "flux2-vae.safetensors", "steps": 20, "cfg": 5.0},
 }
@@ -187,7 +187,7 @@ def main():
                     help="Modellprofil; auto = groesstes passendes fuer die GPU des Servers "
                          "(Default), sonst 4b/4b-base/9b/9b-base")
     ap.add_argument("--steps", type=int, default=None,
-                    help="Sampling-Schritte (Default: 4 distilled, 20 base)")
+                    help="Sampling-Schritte (Default: 8 distilled, 20 base)")
     ap.add_argument("--cfg", type=float, default=None,
                     help="Guidance (Default: 1.0 distilled, 5.0 base)")
     ap.add_argument("--size", default="1024",
