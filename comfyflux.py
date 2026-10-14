@@ -6,6 +6,7 @@ Beispiele:
   python3 comfyflux.py "ein Igel mit Partyhut" --size 1280x720 -o breit.png
   python3 comfyflux.py "change the party hat to blue" --image igel.png -o blau.png
   python3 comfyflux.py "combine image1 and image2" --image igel.png --image https://example.com/foto.jpg
+  python3 comfyflux.py "nutze die Server-Referenz" --image lokal.png --server-image netz-test.png
   python3 comfyflux.py "detailreiche Szene" --profile 9b -o gross.png
 """
 import argparse, json, os, random, sys, time, urllib.error, urllib.parse, urllib.request
@@ -120,20 +121,42 @@ def preflight(server, model, te):
     if problems:
         raise SystemExit("Modell-Problem(e):\n" + "\n".join(problems))
 
-def load_source(src):
-    """Liefert (Dateiname, Bytes) fuer lokale Dateien und http(s)-URLs, sonst (None, None)."""
-    if src.startswith(("http://", "https://")):
+class AddRef(argparse.Action):
+    """Sammelt alle Referenzquellen in EINER Liste, damit die Eingabereihenfolge
+    (image1, image2, ...) ueber verschiedene Flags hinweg erhalten bleibt."""
+    KIND = {"--image": "auto", "--url": "url", "--server-image": "server"}
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        refs = list(getattr(namespace, "refs", None) or [])
+        refs.append((self.KIND[option_string], values))
+        namespace.refs = refs
+
+
+def fetch_ref(kind, value, server):
+    """Liefert (Upload-Name, Bytes) fuer lokale/URL-Quellen, (None, Name) fuer
+    Server-Dateien. Klare Fehler statt stiller Fehlinterpretation."""
+    if kind == "server":
+        with urllib.request.urlopen(server + "/object_info/LoadImage", timeout=30) as r:
+            avail = set(json.load(r)["LoadImage"]["input"]["required"]["image"][0])
+        if value not in avail:
+            raise SystemExit("Server-Bild nicht vorhanden: %s\n  vorhanden: %s" %
+                             (value, ", ".join(sorted(avail)[:12]) or "(keine)"))
+        return None, value
+    if value.startswith(("http://", "https://")):
         try:
-            with urllib.request.urlopen(src, timeout=120) as r:
+            with urllib.request.urlopen(value, timeout=120) as r:
                 data = r.read()
         except Exception as e:
-            raise SystemExit("Download fehlgeschlagen (%s): %s" % (src, e))
-        base = os.path.basename(urllib.parse.urlparse(src).path)
+            raise SystemExit("Download fehlgeschlagen (%s): %s" % (value, e))
+        base = os.path.basename(urllib.parse.urlparse(value).path)
         name = base if os.path.splitext(base)[1] else "url-image.png"
         return name, data
-    if os.path.isfile(src):
-        return os.path.basename(src), open(src, "rb").read()
-    return None, None
+    if kind == "url":
+        raise SystemExit("--url erwartet eine http(s)-Adresse, bekam: %s" % value)
+    if not os.path.isfile(value):
+        raise SystemExit("Datei nicht gefunden: %s"
+                         " (Datei auf dem Server? -> --server-image)" % value)
+    return os.path.basename(value), open(value, "rb").read()
 
 def upload_image(server, name, data):
     boundary = "----comfyflux" + str(random.randrange(10 ** 12))
@@ -152,8 +175,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("prompt", help="Text-to-Image-Prompt ODER Aenderungswunsch beim Editing")
     ap.add_argument("-o", "--out", default=None)
-    ap.add_argument("--image", action="append", default=None,
-                    help="Referenzbild: Dateipfad, Server-Dateiname oder http(s)-URL (mehrfach moeglich) -> Editing")
+    ap.add_argument("--image", action=AddRef, default=None, dest="refs",
+                    help="Referenzbild: lokale Datei ODER http(s)-URL (mehrfach moeglich)")
+    ap.add_argument("--url", action=AddRef, default=None, dest="refs",
+                    help="wie --image, aber explizit als URL (Alias)")
+    ap.add_argument("--server-image", action=AddRef, default=None, dest="refs",
+                    help="Referenzbild per Dateiname aus ComfyUIs input-Ordner (mehrfach moeglich)")
     ap.add_argument("--negative", default="")
     ap.add_argument("--server", default="http://127.0.0.1:8188")
     ap.add_argument("--profile", default="auto", choices=["auto"] + sorted(PROFILES),
@@ -193,15 +220,15 @@ def main():
     p.h -= p.h % 16
 
     refs = []
-    for img in (p.image or []):
-        name, data = load_source(img)
-        if data is not None:
+    for kind, value in (p.refs or []):
+        name, data = fetch_ref(kind, value, p.server)
+        if name is not None:
             # laufende Nummer: gleiche Basenamen (z.B. zwei URLs ohne Endung)
             # wuerden sich beim Upload sonst gegenseitig ueberschreiben
             name = "ref%d-%s" % (len(refs) + 1, name)
             refs.append(upload_image(p.server, name, data))
         else:
-            refs.append(img)
+            refs.append(value)
         print("Referenz: " + refs[-1])
 
     mode = "edit" if refs else "t2i"
