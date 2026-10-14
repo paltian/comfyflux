@@ -9,7 +9,7 @@ Beispiele:
   python3 comfyflux.py "nutze die Server-Referenz" --image lokal.png --server-image netz-test.png
   python3 comfyflux.py "mehr Details, schaerfer" --image foto.png --scale 2 -o foto-2x.png
   python3 comfyflux.py "sharpen, keep everything" --image foto.png --scale 2 --pre-upscale -o scharf.png
-  python3 comfyflux.py "fuer den Versand" --no-metadata -o sauber.png
+  python3 comfyflux.py "mit Workflow-Info fuer spaeter" --metadata -o archiv.png
   python3 comfyflux.py "detailreiche Szene" --profile 9b -o gross.png
 """
 import argparse, json, os, random, struct, sys, time, urllib.error, urllib.parse, urllib.request
@@ -323,9 +323,9 @@ def main():
     ap.add_argument("--pre-upscale", action="store_true",
                     help="Referenzen vorab mit Upscaler-Modell vergroessern (Struktur bleibt "
                          "erhalten), danach Refine-Pass; braucht --scale")
-    ap.add_argument("--no-metadata", action="store_true",
-                    help="Workflow/Prompts nicht in die PNG-Metadaten schreiben "
-                         "(fuer Bilder zum Teilen)")
+    ap.add_argument("--metadata", action="store_true",
+                    help="Workflow/Prompts in die PNG-Metadaten schreiben "
+                         "(Standard: Metadaten werden entfernt)")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--sampler", default="euler")
     ap.add_argument("--model", default=None, help="ueberschreibt das DiT des Profils")
@@ -415,7 +415,7 @@ def main():
             dest = dest.replace(".png", "_%d.png" % i)
         with urllib.request.urlopen(p.server + "/view?" + q, timeout=120) as r:
             data = r.read()
-        if p.no_metadata:
+        if not p.metadata:
             data = strip_png_metadata(data)
         with open(dest, "wb") as f:
             f.write(data)
