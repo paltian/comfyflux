@@ -63,7 +63,7 @@ python3 comfyflux.py "..." --model flux-2-klein-base-4b-fp8.safetensors --cfg 5 
 | Option | Default | Purpose |
 |---|---|---|
 | `prompt` | — | text-to-image prompt, or change request when editing |
-| `--profile` | `4b` | `4b`, `4b-base`, `9b`, `9b-base` — sets model + text encoder + steps/cfg defaults |
+| `--profile` | `auto` | `auto` picks the largest profile whose weights are installed and that fits the server GPU (9b needs ≥15 GB VRAM); or `4b`, `4b-base`, `9b`, `9b-base` explicitly |
 | `--size` | `1024` | `1024` (square) or `BxH` (e.g. `1280x720`); in edit mode it is the megapixel cap |
 | `--steps` | `4` / `20` | sampling steps (4 distilled, 20 base) |
 | `--image` | — | reference image (local path, server-side filename or http(s) URL), repeatable → editing mode |
@@ -87,8 +87,9 @@ In editing mode the output keeps the reference image's aspect ratio.
 ```bash
 bash start-comfy.sh          # auto: GPU with the most free VRAM
 bash start-comfy.sh 1        # explicit nvidia-smi index
+bash start-comfy.sh GPU-f5291eef   # or by card ID (GPU-UUID prefix, slot-stable)
 bash start-comfy.sh status   # running? on which GPU? how much VRAM?
-bash start-comfy.sh gpus     # card table: index, PCI bus, VRAM, PCIe link, load
+bash start-comfy.sh gpus     # card table: index, card ID, PCI bus, VRAM, PCIe link, load
 bash stop-comfy.sh           # graceful stop (SIGTERM, then SIGKILL)
 ```
 

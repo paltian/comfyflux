@@ -87,6 +87,27 @@ def post_json(url, payload):
     except urllib.error.HTTPError as e:
         raise SystemExit("Server-Fehler HTTP %s: %s" % (e.code, e.read().decode()[:800]))
 
+def pick_profile(server):
+    """Groesstes Profil, das zur GPU des Servers passt und dessen Gewichte da sind.
+    9b braucht ~16.6 GB VRAM: ab ~15 GB Gesamt-VRAM ist der Spill verkraftbar."""
+    try:
+        with urllib.request.urlopen(server + "/system_stats", timeout=30) as r:
+            devs = json.load(r).get("devices", [])
+        vram = devs[0].get("vram_total", 0) if devs else 0
+    except Exception:
+        vram = 0
+    avail = {}
+    for node, key in (("UNETLoader", "unet_name"), ("CLIPLoader", "clip_name")):
+        with urllib.request.urlopen(server + "/object_info/" + node, timeout=30) as r:
+            avail[key] = set(json.load(r)[node]["input"]["required"][key][0])
+    for name in ("9b", "4b"):
+        prof = PROFILES[name]
+        if prof["model"] in avail["unet_name"] and prof["te"] in avail["clip_name"]:
+            if name == "9b" and vram < 15_000_000_000:
+                continue
+            return name, "GPU %.1f GB VRAM, Gewichte vorhanden" % (vram / 1e9)
+    return "4b", "Fallback (Gewichte/VRAM unvollstaendig)"
+
 def preflight(server, model, te):
     """Prueft VOR dem Sampling, ob die Gewichte auf dem Server bekannt sind."""
     problems = []
@@ -135,8 +156,9 @@ def main():
                     help="Referenzbild: Dateipfad, Server-Dateiname oder http(s)-URL (mehrfach moeglich) -> Editing")
     ap.add_argument("--negative", default="")
     ap.add_argument("--server", default="http://127.0.0.1:8188")
-    ap.add_argument("--profile", default="4b", choices=sorted(PROFILES),
-                    help="Modellprofil (4b/4b-base/9b/9b-base), setzt Modell+TE+Steps+CFG")
+    ap.add_argument("--profile", default="auto", choices=["auto"] + sorted(PROFILES),
+                    help="Modellprofil; auto = groesstes passendes fuer die GPU des Servers "
+                         "(Default), sonst 4b/4b-base/9b/9b-base")
     ap.add_argument("--steps", type=int, default=None,
                     help="Sampling-Schritte (Default: 4 distilled, 20 base)")
     ap.add_argument("--cfg", type=float, default=None,
@@ -153,6 +175,9 @@ def main():
     ap.add_argument("--prefix", default="flux2-klein")
     ap.add_argument("--timeout", type=int, default=600)
     p = ap.parse_args()
+    if p.profile == "auto":
+        p.profile, why = pick_profile(p.server)
+        print("auto-Profil: %s (%s)" % (p.profile, why))
     prof = PROFILES[p.profile]
     p.model = p.model or prof["model"]
     p.te = p.te or prof["te"]
@@ -181,7 +206,8 @@ def main():
     if "prompt_id" not in res:
         sys.exit("Server-Fehler: " + json.dumps(res)[:500])
     pid = res["prompt_id"]
-    print("prompt_id=%s seed=%d %dx%d modus=%s ..." % (pid, p.seed, p.w, p.h, mode), flush=True)
+    print("prompt_id=%s seed=%d %dx%d [%s] modus=%s ..." %
+          (pid, p.seed, p.w, p.h, p.profile, mode), flush=True)
 
     hist = {}
     while time.time() - t0 < p.timeout:
