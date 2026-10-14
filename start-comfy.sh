@@ -1,11 +1,12 @@
 #!/bin/bash
 # start-comfy.sh - ComfyUI-Instanz starten, GPU waehlbar
 #
-# Aufruf:   start-comfy.sh [auto|<GPU-Index>|status]
+# Aufruf:   start-comfy.sh [auto|<GPU-Index>|status|gpus]
 #   auto (Default) : GPU mit dem meisten freien VRAM
 #                    (Tie-Break: groesster Gesamt-VRAM)
 #   <GPU-Index>    : expliziter nvidia-smi-Index (PCI-Bus-Reihenfolge)
 #   status         : Zustand der Instanz anzeigen
+#   gpus           : Kartentabelle (Index, PCI-Bus, VRAM, PCIe-Link, Belegung)
 #
 # GPUs mit weniger als MIN_FREE_MB freiem VRAM kommen bei auto nicht in
 # Frage; bei expliziter Auswahl gibt es nur eine Warnung.
@@ -22,6 +23,40 @@ usage() {
 
 gpu_table() {
   nvidia-smi --query-gpu=index,name,memory.free,memory.total --format=csv,noheader,nounits
+}
+
+gpus() {
+  local tmp1 tmp2
+  tmp1=$(mktemp) && tmp2=$(mktemp)
+  nvidia-smi --query-gpu=index,uuid,pci.bus_id,name,memory.used,memory.free,memory.total,pcie.link.width.current,pcie.link.gen.max \
+    --format=csv,noheader,nounits > "$tmp1"
+  nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory \
+    --format=csv,noheader,nounits > "$tmp2"
+  awk -F", " '
+    NR == FNR {
+      if (NF < 4) next
+      name = $3; sub(".*/", "", name)
+      procs[$1] = procs[$1] sprintf("%s%s (%.1f GB)", (procs[$1] ? ", " : ""), name, $4 / 1024)
+      next
+    }
+    {
+      printf "%-3s %-12s %5.1f/%5.1f/%5.1f GB   x%-2s Gen%-1s   %s\n", \
+        $1, substr($3, 1, 12), $5 / 1024, $6 / 1024, $7 / 1024, $8, $9, (procs[$2] ? procs[$2] : "-")
+    }
+  ' "$tmp2" "$tmp1"
+  rm -f "$tmp1" "$tmp2"
+  echo
+  local row idx free
+  row=$(gpu_table | awk -F", " -v min="$MIN_FREE_MB" \
+          '$3 >= min {print $1 "|" $3 "|" $4}' | sort -t"|" -k2,2nr -k3,3nr | head -1)
+  if [ -n "$row" ]; then
+    idx="${row%%|*}"
+    free=$(echo "$row" | cut -d"|" -f2)
+    echo "Auto-Auswahl waere: GPU $idx ($((free / 1024)) GB frei)"
+  else
+    echo "Auto-Auswahl: keine GPU mit >= $((MIN_FREE_MB / 1024)) GB frei"
+  fi
+  echo "Hinweis: PCIe-Werte zeigen die Verhandlung im Leerlauf; Gen wird erst unter Last hochgetaktet."
 }
 
 status() {
@@ -43,6 +78,7 @@ status() {
 
 case "${1:-auto}" in
   status) status; exit 0 ;;
+  gpus|list|cards) gpus; exit 0 ;;
   -h|--help|help) usage; exit 0 ;;
 esac
 

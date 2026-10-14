@@ -88,6 +88,7 @@ In editing mode the output keeps the reference image's aspect ratio.
 bash start-comfy.sh          # auto: GPU with the most free VRAM
 bash start-comfy.sh 1        # explicit nvidia-smi index
 bash start-comfy.sh status   # running? on which GPU? how much VRAM?
+bash start-comfy.sh gpus     # card table: index, PCI bus, VRAM, PCIe link, load
 bash stop-comfy.sh           # graceful stop (SIGTERM, then SIGKILL)
 ```
 
