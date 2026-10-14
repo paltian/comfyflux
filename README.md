@@ -69,6 +69,19 @@ python3 comfyflux.py "..." --model flux-2-klein-base-4b-fp8.safetensors --cfg 5 
 Resolutions are rounded down to multiples of 16 (VAE factor 8, patch size 2).
 In editing mode the output keeps the reference image's aspect ratio.
 
+## Server scripts
+
+`start-comfy.sh` / `stop-comfy.sh` manage a ComfyUI instance on a Linux box
+(paths in `start-comfy.sh` point to `~/dev/comfyui` + `~/models/comfyui`):
+
+```bash
+bash ~/dev/comfyflux/start-comfy.sh   # GPU + model paths configured, background
+bash ~/dev/comfyflux/stop-comfy.sh    # graceful stop (SIGTERM, then SIGKILL)
+```
+
+The start script pins the instance to one GPU via `CUDA_DEVICE_ORDER=PCI_BUS_ID`
+and `CUDA_VISIBLE_DEVICES` and loads `extra-model-paths.yaml` explicitly.
+
 ## Shell alias
 
 ```bash
