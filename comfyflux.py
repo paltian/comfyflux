@@ -5,6 +5,7 @@ Beispiele:
   python3 comfyflux.py "ein Igel mit Partyhut" -o igel.png
   python3 comfyflux.py "ein Igel mit Partyhut" --size 1280x720 -o breit.png
   python3 comfyflux.py "change the party hat to blue" --image igel.png -o blau.png
+  python3 comfyflux.py "combine image1 and image2" --image igel.png --image https://example.com/foto.jpg
 """
 import argparse, json, os, random, sys, time, urllib.error, urllib.parse, urllib.request
 
@@ -77,10 +78,23 @@ def post_json(url, payload):
     except urllib.error.HTTPError as e:
         raise SystemExit("Server-Fehler HTTP %s: %s" % (e.code, e.read().decode()[:800]))
 
-def upload_image(server, path):
+def load_source(src):
+    """Liefert (Dateiname, Bytes) fuer lokale Dateien und http(s)-URLs, sonst (None, None)."""
+    if src.startswith(("http://", "https://")):
+        try:
+            with urllib.request.urlopen(src, timeout=120) as r:
+                data = r.read()
+        except Exception as e:
+            raise SystemExit("Download fehlgeschlagen (%s): %s" % (src, e))
+        base = os.path.basename(urllib.parse.urlparse(src).path)
+        name = base if os.path.splitext(base)[1] else "url-image.png"
+        return name, data
+    if os.path.isfile(src):
+        return os.path.basename(src), open(src, "rb").read()
+    return None, None
+
+def upload_image(server, name, data):
     boundary = "----comfyflux" + str(random.randrange(10 ** 12))
-    data = open(path, "rb").read()
-    name = os.path.basename(path)
     disp_img = "Content-Disposition: form-data; name=\"image\"; filename=\"" + name + "\"\r\n"
     disp_over = "Content-Disposition: form-data; name=\"overwrite\"\r\n\r\ntrue\r\n"
     body = (("--" + boundary + "\r\n").encode() + disp_img.encode()
@@ -97,7 +111,7 @@ def main():
     ap.add_argument("prompt", help="Text-to-Image-Prompt ODER Aenderungswunsch beim Editing")
     ap.add_argument("-o", "--out", default=None)
     ap.add_argument("--image", action="append", default=None,
-                    help="Referenzbild (mehrfach moeglich) -> aktiviert Editing")
+                    help="Referenzbild: Dateipfad, Server-Dateiname oder http(s)-URL (mehrfach moeglich) -> Editing")
     ap.add_argument("--negative", default="")
     ap.add_argument("--server", default="http://127.0.0.1:8188")
     ap.add_argument("--steps", type=int, default=4)
@@ -124,7 +138,8 @@ def main():
 
     refs = []
     for img in (p.image or []):
-        refs.append(upload_image(p.server, img) if os.path.isfile(img) else img)
+        name, data = load_source(img)
+        refs.append(upload_image(p.server, name, data) if data is not None else img)
         print("Referenz: " + refs[-1])
 
     mode = "edit" if refs else "t2i"

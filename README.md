@@ -14,8 +14,8 @@ python3 comfyflux.py "..." --size 1280x720 -o breit.png
 # image editing: reference image + change request
 python3 comfyflux.py "change the party hat to bright blue" --image igel.png -o blau.png
 
-# multi-reference editing (up to 10 images)
-python3 comfyflux.py "stylize image1 with the colors of image2" --image a.png --image b.png
+# multi-reference editing (up to 10 images; local paths or http(s) URLs)
+python3 comfyflux.py "stylize image1 with the colors of image2" --image a.png --image https://example.com/b.jpg
 ```
 
 ## How it works
@@ -56,7 +56,7 @@ python3 comfyflux.py "..." --model flux-2-klein-base-4b-fp8.safetensors --cfg 5 
 | `prompt` | — | text-to-image prompt, or change request when editing |
 | `--size` | `1024` | `1024` (square) or `BxH` (e.g. `1280x720`); in edit mode it is the megapixel cap |
 | `--steps` | `4` | sampling steps (4 is the distilled sweet spot) |
-| `--image` | — | reference image, repeatable → enables editing mode |
+| `--image` | — | reference image (local path, server-side filename or http(s) URL), repeatable → editing mode |
 | `--cfg` | `1.0` | guidance scale (meaningful for the `base` variant) |
 | `--negative` | — | negative prompt |
 | `--seed` | random | reproducibility |
