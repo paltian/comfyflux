@@ -140,7 +140,7 @@ def pick_profile(server):
     try:
         for node, key in (("UNETLoader", "unet_name"), ("CLIPLoader", "clip_name")):
             with urllib.request.urlopen(server + "/object_info/" + node, timeout=30) as r:
-                avail[key] = set(json.load(r)[node]["input"]["required"][key][0])
+                avail[key] = widget_choices(json.load(r)[node]["input"]["required"][key])
     except Exception:
         avail = {"unet_name": set(), "clip_name": set()}
     for name in ("9b", "4b"):
@@ -151,6 +151,16 @@ def pick_profile(server):
             return name, "GPU %.1f GB VRAM, Gewichte vorhanden" % (vram / 1e9)
     return "4b", "Fallback (Gewichte/VRAM unvollstaendig)"
 
+def widget_choices(val):
+    """Dateilisten aus object_info-Widgets: [liste, meta] oder ["COMBO", {options}]."""
+    if not isinstance(val, list):
+        return set()
+    if val and isinstance(val[0], list):
+        return set(val[0])
+    if len(val) > 1 and val[0] == "COMBO" and isinstance(val[1], dict):
+        return set(val[1].get("options", []))
+    return set(v for v in val if isinstance(v, str) and v != "COMBO")
+
 def preflight(server, model, te, upscale=None):
     """Prueft VOR dem Sampling, ob die Gewichte auf dem Server bekannt sind."""
     problems = []
@@ -159,7 +169,7 @@ def preflight(server, model, te, upscale=None):
         checks.append(("UpscaleModelLoader", "model_name", upscale))
     for node, key, fname in checks:
         with urllib.request.urlopen(server + "/object_info/" + node, timeout=30) as r:
-            avail = json.load(r)[node]["input"]["required"][key][0]
+            avail = widget_choices(json.load(r)[node]["input"]["required"][key])
         if fname not in avail:
             problems.append("  %s: %s\n     vorhanden: %s" %
                             (fname, "FEHLT auf dem Server", ", ".join(avail) or "(keine)"))
@@ -228,7 +238,7 @@ def fetch_ref(kind, value, server):
     Server-Dateien. Klare Fehler statt stiller Fehlinterpretation."""
     if kind == "server":
         with urllib.request.urlopen(server + "/object_info/LoadImage", timeout=30) as r:
-            avail = set(json.load(r)["LoadImage"]["input"]["required"]["image"][0])
+            avail = widget_choices(json.load(r)["LoadImage"]["input"]["required"]["image"])
         if value not in avail:
             raise SystemExit("Server-Bild nicht vorhanden: %s\n  vorhanden: %s" %
                              (value, ", ".join(sorted(avail)[:12]) or "(keine)"))
