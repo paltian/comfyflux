@@ -1,15 +1,17 @@
 #!/bin/bash
 # start-comfy.sh - ComfyUI-Instanz starten, GPU waehlbar
 #
-# Aufruf:   start-comfy.sh [auto|<GPU-Index>|status|gpus]
+# Aufruf:   start-comfy.sh [auto|<GPU-Index>|<Karten-ID>|status|gpus]
 #   auto (Default) : GPU mit dem meisten freien VRAM
 #                    (Tie-Break: groesster Gesamt-VRAM)
-#   <GPU-Index>    : expliziter nvidia-smi-Index (PCI-Bus-Reihenfolge)
+#   <GPU-Index>    : numerischer nvidia-smi-Index (PCI-Bus-Reihenfolge)
+#   <Karten-ID>    : GPU-UUID oder deren Anfang (z.B. GPU-f5291eef)
+#                    hardware-stabil - gilt auch nach Slot-Tausch/Reboot
 #   status         : Zustand der Instanz anzeigen
-#   gpus           : Kartentabelle (Index, PCI-Bus, VRAM, PCIe-Link, Belegung)
+#   gpus           : Kartentabelle (Index, Karten-ID, PCI-Bus, VRAM, PCIe, Belegung)
 #
 # GPUs mit weniger als MIN_FREE_MB freiem VRAM kommen bei auto nicht in
-# Frage; bei expliziter Auswahl gibt es nur eine Warnung.
+# Frage; bei explizierter Auswahl gibt es nur eine Warnung.
 
 CODE_DIR="$HOME/dev/comfyui"
 MODEL_CFG="/home/markus/dev/comfyui/extra-model-paths.yaml"
@@ -18,11 +20,25 @@ MIN_FREE_MB=8192
 PATTERN="venv/bin/python main.py"
 
 usage() {
-  grep "^#" "$0" | sed "s/^# \{0,1\}//" | head -12
+  grep "^#" "$0" | sed "s/^# \{0,1\}//" | head -14
 }
 
 gpu_table() {
   nvidia-smi --query-gpu=index,name,memory.free,memory.total --format=csv,noheader,nounits
+}
+
+gpu_ids() {
+  nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits
+}
+
+# Karten-ID (UUID-Praefix) -> "Index|UUID"; leer wenn unbekannt
+resolve_id() {
+  local q="$1" uuid idx
+  uuid=$(gpu_ids | awk -F", " -v q="$q" 'index($2, q) == 1 {print $2; exit}')
+  [ -z "$uuid" ] && uuid=$(gpu_ids | awk -F", " -v q="GPU-$q" 'index($2, q) == 1 {print $2; exit}')
+  [ -z "$uuid" ] && return 0
+  idx=$(gpu_ids | awk -F", " -v u="$uuid" '$2 == u {print $1}')
+  echo "$idx|$uuid"
 }
 
 gpus() {
@@ -32,7 +48,7 @@ gpus() {
     --format=csv,noheader,nounits > "$tmp1"
   nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory \
     --format=csv,noheader,nounits > "$tmp2"
-  echo "Idx  PCI-Bus   VRAM benutzt/frei/gesamt   PCIe      Belegt durch"
+  echo "Idx  Karten-ID     PCI-Bus   VRAM benutzt/frei/gesamt   PCIe      Belegt durch"
   LC_ALL=C awk -F", " '
     NR == FNR {
       if (NF < 4) next
@@ -42,8 +58,8 @@ gpus() {
     }
     {
       n = split($3, bus, ":"); busid = bus[n - 1] ":" bus[n]
-      printf "%-3s %-9s %5.1f/%5.1f/%5.1f GB   x%-2s Gen%-1s   %s\n", \
-        $1, busid, $5 / 1024, $6 / 1024, $7 / 1024, $8, $9, (procs[$2] ? procs[$2] : "-")
+      printf "%-3s %-13s %-9s %5.1f/%5.1f/%5.1f GB   x%-2s Gen%-1s   %s\n", \
+        $1, substr($2, 1, 13), busid, $5 / 1024, $6 / 1024, $7 / 1024, $8, $9, (procs[$2] ? procs[$2] : "-")
     }
   ' "$tmp2" "$tmp1"
   rm -f "$tmp1" "$tmp2"
@@ -58,7 +74,8 @@ gpus() {
   else
     echo "Auto-Auswahl: keine GPU mit >= $((MIN_FREE_MB / 1024)) GB frei"
   fi
-  echo "Hinweis: PCIe-Werte zeigen die Verhandlung im Leerlauf; Gen wird erst unter Last hochgetaktet."
+  echo "Karten-ID = Anfang der GPU-UUID (hardware-stabil); als Selektor vollstaendig oder als Anfang nutzbar."
+  echo "PCIe-Werte zeigen die Verhandlung im Leerlauf; Gen wird erst unter Last hochgetaktet."
 }
 
 status() {
@@ -73,8 +90,8 @@ status() {
   ss -tln | grep -q ":$PORT" && echo "Port $PORT: offen" || echo "Port $PORT: NICHT offen"
   local visible
   visible=$(tr "\0" "\n" < /proc/$pid/environ | sed -n "s/^CUDA_VISIBLE_DEVICES=//p")
-  echo "GPU-Index (nvidia-smi): $visible"
-  nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader -i "$visible"
+  echo "Auswahl bei Start: CUDA_VISIBLE_DEVICES=$visible"
+  nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total --format=csv,noheader -i "$visible"
   nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader | grep "^$pid" || true
 }
 
@@ -91,6 +108,22 @@ if [ -n "$pid" ]; then
 fi
 
 SEL="${1:-auto}"
+GPU_IDX=""
+CARD_UUID=""
+
+# Nicht numerisch? Dann als Karten-ID (UUID/Anfang) aufloesen.
+if [ "$SEL" != "auto" ] && ! echo "$SEL" | grep -qE "^[0-9]+$"; then
+  RESOLVED=$(resolve_id "$SEL")
+  if [ -z "$RESOLVED" ]; then
+    echo "FEHLER: keine Karte mit ID '$SEL'. Verfuegbar:"
+    gpus
+    exit 1
+  fi
+  GPU_IDX="${RESOLVED%%|*}"
+  CARD_UUID="${RESOLVED##*|}"
+  echo "Karten-ID $CARD_UUID -> GPU $GPU_IDX"
+fi
+
 if [ "$SEL" = "auto" ]; then
   ROW=$(gpu_table | awk -F", " -v min="$MIN_FREE_MB" \
           '$3 >= min {print $1 "|" $3 "|" $4}' | sort -t"|" -k2,2nr -k3,3nr | head -1)
@@ -103,12 +136,7 @@ if [ "$SEL" = "auto" ]; then
   FREE_MB=$(echo "$ROW" | cut -d"|" -f2)
   echo "Auto-Auswahl: GPU $GPU_IDX mit $((FREE_MB / 1024)) GB frei"
 else
-  GPU_IDX="$SEL"
-  if ! echo "$GPU_IDX" | grep -qE "^[0-9]+$"; then
-    echo "FEHLER: erwartet 'auto', 'status' oder eine GPU-Nummer."
-    usage
-    exit 1
-  fi
+  [ -z "$GPU_IDX" ] && GPU_IDX="$SEL"
   if ! gpu_table | grep -q "^$GPU_IDX,"; then
     echo "FEHLER: GPU $GPU_IDX gibt es nicht:"
     gpu_table
