@@ -144,8 +144,8 @@ def main():
     if p.json:
         print(json.dumps({"out": os.path.abspath(saved[0]), "seed": p.seed, "width": p.w,
                           "height": p.h, "steps": p.steps, "sampler": p.sampler, "mode": mode,
-                          "refs": len(refs), "seconds": round(secs, 1), "prompt": p.prompt,
-                          "model": p.model}))
+                          "refs": len(refs), "seconds": round(secs, 1), "prompt_id": pid,
+                          "prompt": p.prompt, "model": p.model}))
     else:
         print("fertig in %.1fs -> %s  [seed=%d | reproduzieren: --seed %d]"
               % (secs, ", ".join(saved), p.seed, p.seed))
