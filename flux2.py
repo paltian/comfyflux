@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""comfyflux.py - FLUX.2-Klein Text-to-Image UND Image-Editing gegen eine ComfyUI-Instanz.
+"""flux2.py - FLUX.2-Klein Text-to-Image UND Image-Editing gegen eine ComfyUI-Instanz.
 
 Zielgroesse = Basisgroesse x --scale (Default 1).  Bei Referenzen ist die Basis
 die Eingabe, bei t2i gilt --base-size.  Der --scale-mode bestimmt den Weg:
@@ -12,18 +12,21 @@ die Eingabe, bei t2i gilt --base-size.  Der --scale-mode bestimmt den Weg:
   upscale-no-dit (upscale)  kein DiT, reines KI-Upscaling   -> fuer vorhandene Bilder
 
 Beispiele:
-  python3 comfyflux.py "ein Igel mit Partyhut" -o igel.png
-  python3 comfyflux.py "ein Igel mit Partyhut" --base-size 1280x720 -o breit.png
-  python3 comfyflux.py "change the party hat to blue" --image igel.png -o blau.png
-  python3 comfyflux.py "mehr Details" --image foto.png --scale 4 -o foto-4x.png
-  python3 comfyflux.py "mehr Details" --image foto.png --scale 4 --scale-mode pre -o scharf.png
-  python3 comfyflux.py "vorhandenes Foto aufwerten" --image foto.png --scale 2 --scale-mode upscale
-  python3 comfyflux.py "combine image1 and image2" --image a.png --image https://example.com/b.jpg
-  python3 comfyflux.py "mit Workflow-Info" --metadata -o archiv.png
+  flux2 "ein Igel mit Partyhut" -o igel.png
+  flux2 "ein Igel mit Partyhut" --base-size 1280x720 -o breit.png
+  flux2 "change the party hat to blue" --image igel.png -o blau.png
+  flux2 "mehr Details" --image foto.png --scale 4 -o foto-4x.png
+  flux2 "mehr Details" --image foto.png --scale 4 --scale-mode pre -o scharf.png
+  flux2 "vorhandenes Foto aufwerten" --image foto.png --scale 2 --scale-mode upscale
+  flux2 "combine image1 and image2" --image a.png --image https://example.com/b.jpg
+  flux2 "mit Workflow-Info" --metadata -o archiv.png
 """
-import argparse, json, os, random, struct, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse, json, os, random, sys, time
 
-UPSCALE_MODEL = "4x-UltraSharp.pth"
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # auch als Symlink startbar
+
+from comfy_client import (DEFAULT_SERVER, AddRef, Replaced, UPSCALE_MODEL, collect_refs, ensure_server,
+                          get_json, out_path, preflight, run_graph, widget_choices)
 
 PROFILES = {
     "4b":      {"model": "flux-2-klein-4b-fp8.safetensors",      "te": "qwen_3_4b_fp4_flux2.safetensors",
@@ -43,6 +46,13 @@ MODE_ALIASES = {
     "dit": "dit", "regen": "dit",
     "upscale-no-dit": "upscale-no-dit", "upscale": "upscale-no-dit",
 }
+
+Replaced.HINT = {
+    "--size": "--base-size (t2i-Basis) und --scale (Zielfaktor)",
+    "--pre-upscale": "--scale N --scale-mode pre-dit",
+    "--post-upscale": "--scale N --scale-mode post-dit",
+}
+
 
 def target_dims(base_w, base_h, scale):
     return (max(16, int(round(base_w * scale / 16.0)) * 16),
@@ -176,29 +186,18 @@ def build_edit(p, refs, sizes=None):
         note_output(p, tw, th, "DiT in Zielgroesse" if (tw, th) != (bw, bh) else "Basisgroesse")
     return g
 
-def post_json(url, payload):
-    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
-                                 headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        raise SystemExit("Server-Fehler HTTP %s: %s" % (e.code, e.read().decode()[:800]))
-
 def pick_profile(server):
     """Groesstes Profil, das zur GPU des Servers passt und dessen Gewichte da sind.
     9b braucht ~16.6 GB VRAM: ab ~15 GB Gesamt-VRAM ist der Spill verkraftbar."""
     try:
-        with urllib.request.urlopen(server + "/system_stats", timeout=30) as r:
-            devs = json.load(r).get("devices", [])
+        devs = get_json(server, "/system_stats").get("devices", [])
         vram = devs[0].get("vram_total", 0) if devs else 0
     except Exception:
         vram = 0
     avail = {}
     try:
         for node, key in (("UNETLoader", "unet_name"), ("CLIPLoader", "clip_name")):
-            with urllib.request.urlopen(server + "/object_info/" + node, timeout=30) as r:
-                avail[key] = widget_choices(json.load(r)[node]["input"]["required"][key])
+            avail[key] = widget_choices(get_json(server, "/object_info/" + node)[node]["input"]["required"][key])
     except Exception:
         avail = {"unet_name": set(), "clip_name": set()}
     for name in ("9b", "4b"):
@@ -208,162 +207,6 @@ def pick_profile(server):
                 continue
             return name, "GPU %.1f GB VRAM, Gewichte vorhanden" % (vram / 1e9)
     return "4b", "Fallback (Gewichte/VRAM unvollstaendig)"
-
-def strip_png_metadata(data):
-    """Entfernt PNG-Text-Metadaten (tEXt/zTXt/iTXt/eXIf = Workflow+Prompts),
-    Pixel bleiben unveraendert."""
-    if data[:8] != b"\x89PNG\r\n\x1a\n":
-        return data
-    out = bytearray(data[:8])
-    i, n = 8, len(data)
-    while i + 8 <= n:
-        length = int.from_bytes(data[i:i + 4], "big")
-        ctype = data[i + 4:i + 8]
-        end = i + 12 + length
-        if end > n:
-            out += data[i:]
-            break
-        if ctype not in (b"tEXt", b"zTXt", b"iTXt", b"eXIf"):
-            out += data[i:end]
-        if ctype == b"IEND":
-            break
-        i = end
-    return bytes(out)
-
-def widget_choices(val):
-    """Dateilisten aus object_info-Widgets: [liste, meta] oder ["COMBO", {options}]."""
-    if not isinstance(val, list):
-        return set()
-    if val and isinstance(val[0], list):
-        return set(val[0])
-    if len(val) > 1 and val[0] == "COMBO" and isinstance(val[1], dict):
-        return set(val[1].get("options", []))
-    return set(v for v in val if isinstance(v, str) and v != "COMBO")
-
-def preflight(server, model=None, te=None, upscale=None):
-    """Prueft VOR dem Sampling, ob die Gewichte auf dem Server bekannt sind."""
-    problems = []
-    checks = []
-    if model:
-        checks.append(("UNETLoader", "unet_name", model))
-    if te:
-        checks.append(("CLIPLoader", "clip_name", te))
-    if upscale:
-        checks.append(("UpscaleModelLoader", "model_name", upscale))
-    for node, key, fname in checks:
-        with urllib.request.urlopen(server + "/object_info/" + node, timeout=30) as r:
-            avail = widget_choices(json.load(r)[node]["input"]["required"][key])
-        if fname not in avail:
-            problems.append("  %s: %s\n     vorhanden: %s" %
-                            (fname, "FEHLT auf dem Server", ", ".join(avail) or "(keine)"))
-    if problems:
-        raise SystemExit("Modell-Problem(e):\n" + "\n".join(problems))
-
-class AddRef(argparse.Action):
-    """Sammelt alle Referenzquellen in EINER Liste, damit die Eingabereihenfolge
-    (image1, image2, ...) ueber verschiedene Flags hinweg erhalten bleibt."""
-    KIND = {"--image": "auto", "--url": "url", "--server-image": "server"}
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        refs = list(getattr(namespace, "refs", None) or [])
-        refs.append((self.KIND[option_string], values))
-        namespace.refs = refs
-
-class Replaced(argparse.Action):
-    """Alte Flags freundlich zu ihrer Abloesung fuehren."""
-    HINT = {
-        "--size": "--base-size (t2i-Basis) und --scale (Zielfaktor)",
-        "--pre-upscale": "--scale N --scale-mode pre-dit",
-        "--post-upscale": "--scale N --scale-mode post-dit",
-    }
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        raise SystemExit("%s wurde ersetzt durch: %s" % (option_string, self.HINT[option_string]))
-
-def image_size(data):
-    """(width, height) aus PNG/JPEG/GIF/BMP/WebP-Bytes, sonst None."""
-    try:
-        if data[:8] == b"\x89PNG\r\n\x1a\n":
-            return struct.unpack(">II", data[16:24])
-        if data[:3] == b"\xff\xd8\xff":
-            i = 2
-            while i < len(data) - 9:
-                if data[i] != 0xFF:
-                    i += 1
-                    continue
-                m = data[i + 1]
-                if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
-                    h, w = struct.unpack(">HH", data[i + 5:i + 9])
-                    return w, h
-                i += 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
-            return None
-        if data[:4] == b"GIF8":
-            return struct.unpack("<HH", data[6:10])
-        if data[:2] == b"BM":
-            w, h = struct.unpack("<ii", data[18:26])
-            return w, abs(h)
-        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-            if data[12:16] == b"VP8X":
-                return (int.from_bytes(data[24:27], "little") + 1,
-                        int.from_bytes(data[27:30], "little") + 1)
-            if data[12:16] == b"VP8L":
-                bits = struct.unpack("<I", data[21:25])[0]
-                return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
-            if data[12:16] == b"VP8 ":
-                w, h = struct.unpack("<HH", data[26:30])
-                return w & 0x3FFF, h & 0x3FFF
-    except Exception:
-        pass
-    return None
-
-def download_input(server, name):
-    """Holt ein Bild aus ComfyUIs input-Ordner (fuer Groessenbestimmung)."""
-    q = urllib.parse.urlencode({"filename": os.path.basename(name),
-                                "subfolder": os.path.dirname(name), "type": "input"})
-    try:
-        with urllib.request.urlopen(server + "/view?" + q, timeout=60) as r:
-            return r.read()
-    except Exception:
-        return None
-
-def fetch_ref(kind, value, server):
-    """Liefert (Upload-Name, Bytes) fuer lokale/URL-Quellen, (None, Name) fuer
-    Server-Dateien. Klare Fehler statt stiller Fehlinterpretation."""
-    if kind == "server":
-        with urllib.request.urlopen(server + "/object_info/LoadImage", timeout=30) as r:
-            avail = widget_choices(json.load(r)["LoadImage"]["input"]["required"]["image"])
-        if value not in avail:
-            raise SystemExit("Server-Bild nicht vorhanden: %s\n  vorhanden: %s" %
-                             (value, ", ".join(sorted(avail)[:12]) or "(keine)"))
-        return None, value
-    if value.startswith(("http://", "https://")):
-        try:
-            with urllib.request.urlopen(value, timeout=120) as r:
-                data = r.read()
-        except Exception as e:
-            raise SystemExit("Download fehlgeschlagen (%s): %s" % (value, e))
-        base = os.path.basename(urllib.parse.urlparse(value).path)
-        name = base if os.path.splitext(base)[1] else "url-image.png"
-        return name, data
-    if kind == "url":
-        raise SystemExit("--url erwartet eine http(s)-Adresse, bekam: %s" % value)
-    if not os.path.isfile(value):
-        raise SystemExit("Datei nicht gefunden: %s"
-                         " (Datei auf dem Server? -> --server-image)" % value)
-    return os.path.basename(value), open(value, "rb").read()
-
-def upload_image(server, name, data):
-    boundary = "----comfyflux" + str(random.randrange(10 ** 12))
-    disp_img = "Content-Disposition: form-data; name=\"image\"; filename=\"" + name + "\"\r\n"
-    disp_over = "Content-Disposition: form-data; name=\"overwrite\"\r\n\r\ntrue\r\n"
-    body = (("--" + boundary + "\r\n").encode() + disp_img.encode()
-            + b"Content-Type: application/octet-stream\r\n\r\n" + data + b"\r\n"
-            + ("--" + boundary + "\r\n").encode() + disp_over.encode()
-            + ("--" + boundary + "--\r\n").encode())
-    req = urllib.request.Request(server + "/upload/image", data=body,
-                                 headers={"Content-Type": "multipart/form-data; boundary=" + boundary})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return json.load(r).get("name", name)
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -376,7 +219,8 @@ def main():
     ap.add_argument("--server-image", action=AddRef, default=None, dest="refs",
                     help="Referenzbild per Dateiname aus ComfyUIs input-Ordner (mehrfach moeglich)")
     ap.add_argument("--negative", default="")
-    ap.add_argument("--server", default="http://127.0.0.1:8188")
+    ap.add_argument("--server", default=DEFAULT_SERVER,
+                    help="ComfyUI-Adresse (Default: $COMFYFLUX_SERVER oder %s)" % DEFAULT_SERVER)
     ap.add_argument("--profile", default="auto", choices=["auto"] + sorted(PROFILES),
                     help="Modellprofil; auto = groesstes passendes fuer die GPU des Servers "
                          "(Default), sonst 4b/4b-base/9b/9b-base")
@@ -404,6 +248,9 @@ def main():
     ap.add_argument("--vae", default=None, help="ueberschreibt den VAE des Profils")
     ap.add_argument("--prefix", default="flux2-klein")
     ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--no-autostart", action="store_true",
+                    help="Server nicht selbst starten, auch wenn er lokal eingerichtet ist")
+    ap.add_argument("--json", action="store_true", help="Ergebnis als JSON statt Textzeile")
     # abgeloeste Flags
     ap.add_argument("--size", nargs="?", const="1", default=None, action=Replaced, help=argparse.SUPPRESS)
     ap.add_argument("--pre-upscale", nargs="?", const="1", default=None, action=Replaced, help=argparse.SUPPRESS)
@@ -419,12 +266,7 @@ def main():
     if p.scale <= 1 and p.scale_mode == "upscale-no-dit":
         raise SystemExit("upscale-no-dit braucht --scale > 1")
 
-    try:
-        with urllib.request.urlopen(p.server + "/system_stats", timeout=10) as r:
-            r.read(1)
-    except Exception as e:
-        raise SystemExit("ComfyUI nicht erreichbar unter %s (%s)\n"
-                         "  Server starten mit: bash ~/dev/comfyflux/start-comfy.sh" % (p.server, e))
+    ensure_server(p.server, autostart=not p.no_autostart)
     if p.profile == "auto":
         p.profile, why = pick_profile(p.server)
         print("auto-Profil: %s (%s)" % (p.profile, why))
@@ -445,77 +287,38 @@ def main():
     if p.scale_mode in ("pre-dit", "upscale-no-dit") and not (p.refs or []):
         raise SystemExit("%s braucht mindestens eine Referenz (--image/--url/--server-image)"
                          % p.scale_mode)
-    refs = []
-    sizes = []
-    for kind, value in (p.refs or []):
-        name, data = fetch_ref(kind, value, p.server)
-        if name is not None:
-            # laufende Nummer: gleiche Basenamen (z.B. zwei URLs ohne Endung)
-            # wuerden sich beim Upload sonst gegenseitig ueberschreiben
-            name = "ref%d-%s" % (len(refs) + 1, name)
-            sizes.append(image_size(data))
-            refs.append(upload_image(p.server, name, data))
-        else:
-            sizes.append(image_size(download_input(p.server, value) or b""))
-            refs.append(value)
-        print("Referenz: " + refs[-1])
+    refs, sizes = collect_refs(p.server, p.refs)
 
     if p.scale_mode == "upscale-no-dit":
         if len(refs) > 1:
             print("Hinweis: upscale-no-dit nutzt nur image1 (%d Referenzen angegeben)." % len(refs))
-        preflight(p.server, upscale=UPSCALE_MODEL)
+        preflight(p.server, [("UpscaleModelLoader", "model_name", UPSCALE_MODEL)])
         bw, bh = sizes[0] if (sizes and sizes[0]) else (p.w, p.h)
         graph = build_upscale_only(p, refs[0], bw, bh)
     else:
-        preflight(p.server, p.model, p.te,
-                  UPSCALE_MODEL if (p.scale_mode == "pre-dit" or
-                                    (p.scale_mode == "post-dit" and p.scale != 1)) else None)
+        checks = [("UNETLoader", "unet_name", p.model), ("CLIPLoader", "clip_name", p.te)]
+        if p.scale_mode == "pre-dit" or (p.scale_mode == "post-dit" and p.scale != 1):
+            checks.append(("UpscaleModelLoader", "model_name", UPSCALE_MODEL))
+        preflight(p.server, checks)
         graph = build_edit(p, refs, sizes) if refs else build_t2i(p)
 
     mode = "edit" if refs else "t2i"
-    t0 = time.time()
-    res = post_json(p.server + "/prompt", {"prompt": graph})
-    if "prompt_id" not in res:
-        sys.exit("Server-Fehler: " + json.dumps(res)[:500])
-    pid = res["prompt_id"]
+    dest = out_path(p.out, p.prefix, p.seed)
     ow, oh = getattr(p, "out_wh", (p.w, p.h))
-    print("prompt_id=%s seed=%d %dx%d [%s] modus=%s ..." %
-          (pid, p.seed, ow, oh, p.profile, mode), flush=True)
+    if not p.json:
+        print("seed=%d %dx%d [%s] modus=%s ..." % (p.seed, ow, oh, p.profile, mode), flush=True)
 
-    hist = {}
-    while time.time() - t0 < p.timeout:
-        with urllib.request.urlopen(p.server + "/history/" + pid, timeout=30) as r:
-            hist = json.load(r)
-        if pid in hist:
-            break
-        time.sleep(2)
+    saved, secs, pid = run_graph(p.server, graph, p.timeout, out=dest, prefix=p.prefix,
+                                 metadata=p.metadata, quiet=p.json)
+    if p.json:
+        print(json.dumps({"out": os.path.abspath(saved[0]), "seed": p.seed, "width": ow, "height": oh,
+                          "steps": p.steps, "profile": p.profile, "mode": mode,
+                          "scale": p.scale, "scale_mode": p.scale_mode, "seconds": round(secs, 1),
+                          "prompt_id": pid, "prompt": p.prompt}))
     else:
-        sys.exit("Timeout nach %ds" % p.timeout)
+        print("fertig in %.1fs -> %s  [seed=%d | reproduzieren: --seed %d]"
+              % (secs, ", ".join(saved), p.seed, p.seed))
 
-    entry = hist.get(pid, {})
-    status = entry.get("status", {})
-    if status.get("status_str") == "error":
-        sys.exit("Sampling-Fehler: " + json.dumps(status)[:600])
-    imgs = [im for out in entry.get("outputs", {}).values() for im in out.get("images", [])]
-    if not imgs:
-        sys.exit("keine Bilder in outputs: " + json.dumps(entry)[:600])
-
-    saved = []
-    for i, im in enumerate(imgs):
-        q = urllib.parse.urlencode({"filename": im["filename"], "subfolder": im.get("subfolder", ""),
-                                    "type": im.get("type", "output")})
-        dest = p.out or ("%s_%d.png" % (p.prefix, p.seed))
-        if len(imgs) > 1:
-            dest = dest.replace(".png", "_%d.png" % i)
-        with urllib.request.urlopen(p.server + "/view?" + q, timeout=120) as r:
-            data = r.read()
-        if not p.metadata:
-            data = strip_png_metadata(data)
-        with open(dest, "wb") as f:
-            f.write(data)
-        saved.append(dest)
-    print("fertig in %.1fs -> %s  [seed=%d | reproduzieren: --seed %d]" %
-          (time.time() - t0, ", ".join(saved), p.seed, p.seed))
 
 if __name__ == "__main__":
     main()

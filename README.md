@@ -1,135 +1,143 @@
 # comfyflux
 
-A tiny, dependency-free CLI for **FLUX.2 Klein** text-to-image generation and image
-editing on top of a running [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
-instance. No browser, no node graph — prompt in, PNG out.
+Bildgenerierung mit FLUX über ComfyUI (lokal) und NVIDIA NIM (Cloud). Ein Repo
+für Client **und** Server: die Clients sprechen HTTP mit ComfyUI, die Skripte
+`start-comfy.sh` / `stop-comfy.sh` verwalten die lokale Instanz.
 
-```bash
-# text-to-image
-python3 comfyflux.py "a hedgehog wearing a tiny party hat, flash photography" -o igel.png
-
-# target size: base-size x scale (default scale 1, base 1024x1024)
-python3 comfyflux.py "..." --base-size 1280x720 -o breit.png
-python3 comfyflux.py "..." --base-size 512 --scale 3 -o gross.png
-
-# image editing: reference image + change request
-python3 comfyflux.py "change the party hat to bright blue" --image igel.png -o blau.png
-
-# multi-reference editing (up to 10 images; local paths or http(s) URLs)
-python3 comfyflux.py "stylize image1 with the colors of image2" --image a.png --image https://example.com/b.jpg
-```
-
-## How it works
-
-ComfyUI is an HTTP server; its web UI is just one client. `comfyflux.py` speaks to
-the API directly:
-
-1. `POST /prompt` — the pipeline as a JSON graph (loaders, sampler, save node)
-2. `GET /history/<id>` — polling until the run is done
-3. `GET /view?filename=...` — downloads the finished PNG
-
-Reference images travel the other way via `POST /upload/image` (multipart).
-Runs on any machine that can reach the server (`--server http://host:8188`),
-Python 3 standard library only.
-
-## Requirements
-
-A running ComfyUI with the FLUX.2 Klein 4B files in place:
-
-| File | Folder | Size | Source |
-|---|---|---|---|
-| `flux-2-klein-4b-fp8.safetensors` | `models/diffusion_models/` | 3.9 GB | [black-forest-labs/FLUX.2-klein-4b-fp8](https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8) |
-| `qwen_3_4b_fp4_flux2.safetensors` | `models/text_encoders/` | 3.9 GB | [Comfy-Org/flux2-klein-4B](https://huggingface.co/Comfy-Org/flux2-klein-4B) |
-| `flux2-vae.safetensors` | `models/vae/` | 336 MB | [Comfy-Org/flux2-dev](https://huggingface.co/Comfy-Org/flux2-dev) |
-
-Total VRAM footprint: ~8.1 GB — fits a 12 GB card (RTX 3060) fully resident.
-
-For the **9B** profiles use `flux-2-klein-9b-fp8.safetensors` +
-`qwen_3_8b_fp4mixed.safetensors` (6.8 GB, from
-[Comfy-Org/flux2-klein-9B](https://huggingface.co/Comfy-Org/flux2-klein-9B)).
-The 9B diffusion models at [black-forest-labs](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8)
-are gated — accept the license with a (free) HuggingFace account first.
-With fp8 DiT (9.4 GB) + fp4 text encoder (6.8 GB) the 9B family needs
-~16.6 GB VRAM: comfortable on 24 GB, workable on 16 GB (a little Dynamic-VRAM
-spill), too much for 12 GB.
-
-To use different checkpoints (e.g. the `base` variant for CFG > 1):
-
-```bash
-python3 comfyflux.py "..." --model flux-2-klein-base-4b-fp8.safetensors --cfg 5 --steps 20
-```
-
-## Options
-
-| Option | Default | Purpose |
+| Befehl | Modell | Läuft wo |
 |---|---|---|
-| `prompt` | — | text-to-image prompt, or change request when editing |
-| `--profile` | `auto` | `auto` picks the largest profile whose weights are installed and that fits the server GPU (9b needs ≥15 GB VRAM); or `4b`, `4b-base`, `9b`, `9b-base` explicitly |
-| `--base-size` | `1024x1024` | base canvas for t2i (`WxH` or square); for editing the input image is the base |
-| `--steps` | `8` / `20` | sampling steps (8 distilled, 20 base) |
-| `--image` | — | reference image: local file **or** http(s) URL, repeatable → editing mode |
-| `--url` | — | alias for `--image`, explicitly a URL |
-| `--server-image` | — | reference by filename already in ComfyUI's input folder (no upload) |
+| `flux2` | FLUX.2 Klein (4B/9B, fp8) | ComfyUI |
+| `flux3` | FLUX.3 Image Klein (GGUF) | ComfyUI |
+| `flux3-nim` | FLUX.3 Image Klein | NVIDIA NIM (Cloud) |
 
-All reference flags share one order: `image1..imageN` follow the command line.
-| `--cfg` | `1.0` / `5.0` | guidance scale (1 distilled, 5 base) |
-| `--negative` | — | negative prompt |
-| `--seed` | random | reproducibility |
-| `--scale` | `1` | target size = base × factor (1 = unchanged) |
-| `--scale-mode` | `post-dit` | how scaling happens — see below |
-| `--metadata` | — | keep workflow/prompt metadata in output PNGs (default: stripped clean) |
-| `--batch` | `1` | images per run |
-| `--sampler` | `euler` | sampler selection |
-| `--model/--te/--vae` | from profile | override individual checkpoints |
-| `--server` | `http://127.0.0.1:8188` | any reachable ComfyUI instance |
-| `-o`, `--prefix`, `--timeout` | — | output file, filename prefix, run limit |
+`flux2` und `flux3` teilen sich `comfy_client.py` (HTTP, Upload, Graph-Ausführung,
+Autostart). `flux3-nim` ist eigenständig – anderer Anbieter, anderes Protokoll.
 
-Resolutions are rounded down to multiples of 16 (VAE factor 8, patch size 2).
-
-## Scaling modes
-
-Target size is always `base × --scale`. The mode decides how to get there
-(long form / short alias):
-
-| Mode | What happens | Cost at scale 4 | Character |
-|---|---|---|---|
-| `post-dit` (`post`) | DiT at base size, then AI-upscale the result | ~12 s | fast, faithful (default) |
-| `pre-dit` (`pre`) | upscale references first, then refine at target size | ~28 s | faithful + real detail |
-| `dit` (`regen`) | DiT generates directly at target size | ~25 s | creative, identity may drift |
-| `upscale-no-dit` (`upscale`) | no DiT, pure AI upscaling of the input | ~2 s | for existing images |
-In editing mode the output keeps the reference image's aspect ratio.
-
-## Server scripts
-
-`start-comfy.sh` / `stop-comfy.sh` manage a ComfyUI instance on a Linux box
-(paths in `start-comfy.sh` point to `~/dev/comfyui` + `~/models/comfyui`):
+## Installation
 
 ```bash
-bash start-comfy.sh          # auto: GPU with the most free VRAM
-bash start-comfy.sh 1        # explicit nvidia-smi index
-bash start-comfy.sh GPU-f5291eef   # or by card ID (GPU-UUID prefix, slot-stable)
-bash start-comfy.sh status   # running? on which GPU? how much VRAM?
-bash start-comfy.sh gpus     # card table: index, card ID, PCI bus, VRAM, PCIe link, load
-bash stop-comfy.sh           # graceful stop (SIGTERM, then SIGKILL)
+git clone git@github.com:paltian/comfyflux.git ~/dev/comfyflux
+ln -sf ~/dev/comfyflux/flux2.py     ~/.local/bin/flux2
+ln -sf ~/dev/comfyflux/flux3.py     ~/.local/bin/flux3
+ln -sf ~/dev/comfyflux/flux3-nim.py ~/.local/bin/flux3-nim
 ```
 
-GPU selection: `auto` picks the GPU with the most free VRAM (tie-break: largest
-total VRAM) and refuses cards below 8 GB free; an explicit index only warns.
-The instance is pinned to one GPU via `CUDA_DEVICE_ORDER=PCI_BUS_ID` +
-`CUDA_VISIBLE_DEVICES` and loads `extra-model-paths.yaml` explicitly.
+Nur Python-Standardbibliothek, keine Abhängigkeiten.
 
-## Shell alias
+## Server-Adresse
+
+Standard ist `http://127.0.0.1:8188`. Auf einem Rechner ohne lokale Instanz zeigt
+`COMFYFLUX_SERVER` auf den entfernten Server:
 
 ```bash
-alias flux='python3 ~/dev/comfyflux/comfyflux.py --server http://your-server:8188'
+export COMFYFLUX_SERVER='http://volleymasterL:8188'
 ```
 
-## Security note
+`--server` schlägt die Variable, die Variable schlägt den Standard.
 
-ComfyUI itself has no authentication. Keep it on `127.0.0.1` and use an SSH
-tunnel (`ssh -L 8188:localhost:8188 host`) or put an authenticating reverse
-proxy in front of it before exposing it to a network.
+## Autostart
 
-## License
+ComfyUI wird **nur lokal und nur bei Bedarf** gestartet:
 
-MIT — see [LICENSE](LICENSE).
+| Lage | Verhalten |
+|---|---|
+| Server antwortet | nichts |
+| nicht erreichbar, Adresse entfernt | Fehler mit dem Startbefehl für den Server – **kein** Startversuch |
+| nicht erreichbar, Adresse lokal, `~/dev/comfyui` vorhanden | `start-comfy.sh`, dann bis 180 s auf Bereitschaft warten |
+| nicht erreichbar, Adresse lokal, kein `~/dev/comfyui` | Fehler mit Hinweis auf `--server` |
+| `--no-autostart` | nie starten |
+
+Auf einem Laptop ohne ComfyUI greift der Autostart also nie; auf dem Server, auf
+dem ComfyUI eingerichtet ist, schon.
+
+## Key für `flux3-nim`
+
+Der Key steht **nie** im Repo. Reihenfolge:
+
+1. `$NVIDIA_API_KEY`
+2. `~/.config/flux/nvidia-api-key` (nur der Key, `chmod 600`)
+3. `~/.pi/agent/auth.json`, Eintrag `nvidia` (von pi verwaltet)
+
+```bash
+mkdir -p ~/.config/flux && echo 'nvapi-...' > ~/.config/flux/nvidia-api-key
+chmod 600 ~/.config/flux/nvidia-api-key
+```
+
+## Server einrichten (einmalig)
+
+**ComfyUI ≥ 0.41** – ältere Versionen kennen `flux3` nicht im `CLIPType`:
+
+```bash
+cd ~/dev/comfyui && git pull && venv/bin/python -m pip install -r requirements.txt
+```
+
+**Custom Node für GGUF** (ComfyUI selbst kann kein GGUF):
+
+```bash
+git clone https://github.com/city96/ComfyUI-GGUF ~/dev/comfyui/custom_nodes/ComfyUI-GGUF
+~/dev/comfyui/venv/bin/python -m pip install --upgrade gguf
+```
+
+**Modelle** nach `~/models/comfyui/`:
+
+```bash
+# DiT, GGUF Q5_K_XL (4,17 GiB) - gemessen: LPIPS 0,020 / SSIM 0,966 gegen bf16
+hf download unsloth/flux-3-image-klein-GGUF flux-3-image-klein-UD-Q5_K_XL.gguf \
+  --local-dir ~/models/comfyui/diffusion_models
+
+# Text-Encoder Qwen3-VL-4B int8 (4,52 GiB).
+# BFLs Repo ist gated (HTTP 401 ohne Token); der Spiegel ist byte-identisch:
+hf download ml-resources/flux-3-image-klein-comfy \
+  text_encoders/qwen3vl_4b_int8_convrot.safetensors --local-dir ~/models/comfyui
+
+# VAE: flux2-vae.safetensors, meist schon vorhanden (0,31 GiB)
+```
+
+Gemessen auf einer RTX 3060 12 GB: Peak 9,6 GB von 12,3 GB, ~50 s für
+1024×1024 mit 15 Schritten. Größere Quants (Q8_0, int8) passen neben einem
+zweiten GPU-Prozess nicht mehr.
+
+## Beispiele
+
+```bash
+# Text zu Bild
+flux3 "ein Igel mit Partyhut, Studiofoto" --size 1024x1024 -o igel.png
+
+# Editing: die Ausgabegröße kommt aus der Referenz, --size ist hier ohne Wirkung
+flux3 "dieselbe Szene nachts bei Vollmond" --image igel.png -o nacht.png
+
+# Multi-Reference: bis 10 Bilder, in Reihenfolge
+flux3 "kombiniere beide Motive" --image a.png --image b.png -o mix.png
+
+# reproduzierbar und maschinenlesbar
+flux3 "..." --seed 42 --json
+
+# FLUX.2 mit automatischer Profilwahl (4b auf 12 GB, 9b ab ~15 GB VRAM)
+flux2 "ein Igel mit Partyhut" -o igel2.png
+flux2 "mehr Details" --image foto.png --scale 2 --scale-mode pre-dit -o scharf.png
+
+# Cloud, ohne VRAM-Bedarf
+flux3-nim "a lighthouse in a storm" --size 1280x720 -o leuchtturm.jpg
+```
+
+## Hinweise
+
+- **`--size` beim Editing** wird ignoriert; die Größe ergibt sich aus der
+  Referenz mal `--ref-megapixels` (`0` = Originalmaße). Die CLI sagt das
+  ausdrücklich, statt es stillschweigend zu schlucken.
+- **Sampler**: Default `er_sde` mit 15 Schritten (offizielles T2I-Template).
+  Das offizielle Editing-Template nutzt `euler` mit 16 Schritten –
+  überschreibbar mit `--sampler euler --steps 16`.
+- **NIM-Grenzen**: `flux3-nim` akzeptiert nur 512…1568 in 16er-Schritten;
+  andere Formate werden mit Erhalt des Seitenverhältnisses eingepasst.
+  Editing gibt es nur lokal – NIM verlangt Asset-Referenzen (`example_id`).
+- **PNG-Metadaten** (Workflow, Prompts) werden standardmäßig entfernt;
+  `--metadata` behält sie.
+- **`flux2`-Profile** `4b-base` und `9b-base` brauchen Dateien, die nicht Teil
+  dieses Setups sind.
+
+## Lizenz
+
+MIT (siehe `LICENSE`). Modelle haben eigene Lizenzen: FLUX 3 Image Klein steht
+unter der FLUX Kommunity License (nicht-kommerziell frei, kommerziell für
+Qualifying Users unter 5 Mio. USD Jahresumsatz).
