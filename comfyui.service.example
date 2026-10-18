@@ -1,0 +1,42 @@
+# comfyui.service.example - ComfyUI als systemd-User-Dienst
+#
+# Einrichten:
+#   cp comfyui.service.example ~/.config/systemd/user/comfyui.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now comfyui.service
+#   loginctl enable-linger $USER        # Dienst laeuft auch ohne Login-Sitzung
+#
+# Anzupassen:
+#   CUDA_VISIBLE_DEVICES   GPU-Index. Welche Karte welche Nummer hat:
+#                          ./start-comfy.sh gpus
+#   Pfade                  %h ist das Home des Nutzers, der den Dienst startet
+#
+# Ohne die [Install]-Sektion startet der Dienst nicht beim Booten, dann nur
+# manuell mit `systemctl --user start comfyui.service` - sinnvoll, wenn der
+# Server VRAM nicht dauerhaft belegen soll.
+#
+# Zusammenspiel mit den Skripten:
+#   start-comfy.sh   erkennt einen laufenden Dienst und startet nichts doppelt
+#   stop-comfy.sh    beendet mit SIGTERM; systemd wertet das als sauberes Ende
+#                    und startet deshalb NICHT neu (Restart=on-failure greift
+#                    nur bei Absturz, Non-Zero-Exit oder OOM-Kill)
+#   flux2 / flux3    starten bevorzugt ueber diese Unit, sonst ueber das Skript
+#
+# Achtung: ExecStart wiederholt den Befehl aus start-comfy.sh. Aendert sich dort
+# etwas (Port, Modellpfade, Flags), muss diese Unit nachgezogen werden.
+
+[Unit]
+Description=ComfyUI (FLUX) auf einer festen GPU
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dev/comfyui
+Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID
+Environment=CUDA_VISIBLE_DEVICES=1
+ExecStart=%h/dev/comfyui/venv/bin/python main.py --listen 0.0.0.0 --port 8188 --extra-model-paths-config %h/dev/comfyui/extra-model-paths.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

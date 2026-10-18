@@ -48,7 +48,23 @@ ComfyUI wird **nur lokal und nur bei Bedarf** gestartet:
 | `--no-autostart` | nie starten |
 
 Auf einem Laptop ohne ComfyUI greift der Autostart also nie; auf dem Server, auf
-dem ComfyUI eingerichtet ist, schon.
+dem ComfyUI eingerichtet ist, schon. Gestartet wird zuerst über eine
+systemd-User-Unit `comfyui.service`, falls es sie gibt – sonst über
+`start-comfy.sh`.
+
+### Als systemd-Dienst
+
+```bash
+cp comfyui.service.example ~/.config/systemd/user/comfyui.service
+# CUDA_VISIBLE_DEVICES anpassen (./start-comfy.sh gpus zeigt die Karten)
+systemctl --user daemon-reload && systemctl --user enable --now comfyui.service
+loginctl enable-linger $USER      # läuft auch ohne Login-Sitzung
+```
+
+Die Unit legt die GPU fest. `stop-comfy.sh` beendet den Dienst mit SIGTERM;
+systemd zählt das als sauberes Ende und startet nicht neu – `Restart=on-failure`
+greift nur bei Absturz oder OOM-Kill. Ohne `[Install]`-Sektion startet der Dienst
+nicht beim Booten, dann nur manuell.
 
 ## Key für `flux3-nim`
 
