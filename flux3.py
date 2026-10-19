@@ -32,9 +32,9 @@ from comfy_client import (UPSCALE_MODEL, AddRef, add_common_args, add_upscale_ta
                           ensure_server, node_available, out_path, parse_size, preflight, run_graph)
 
 MODE_ALIASES = {"post-dit": "post-dit", "post": "post-dit",
+                "dit": "dit", "regen": "dit",
                 "upscale-no-dit": "upscale-no-dit", "upscale": "upscale-no-dit"}
 MODE_HELP = {
-    "dit": "bei flux3 einfach --size WxH (ohne --scale) - der DiT rechnet direkt in der Zielgroesse",
     "pre-dit": "nicht unterstuetzt; --ref-mp skaliert Referenzen (Lanczos)",
 }
 
@@ -52,6 +52,9 @@ GGUF_NODE = "UnetLoaderGGUF"
 
 
 def build_t2i(p):
+    # dit: der DiT erzeugt die Zielgroesse selbst; post-dit: er erzeugt die
+    # Basis, der KI-Upscaler macht das Ziel.
+    gen_w, gen_h = (int(p.w * p.scale), int(p.h * p.scale)) if p.scale_mode == "dit" else (p.w, p.h)
     g = {
         "1": {"class_type": GGUF_NODE, "inputs": {"unet_name": p.model}},
         "2": {"class_type": "CLIPLoader",
@@ -60,7 +63,7 @@ def build_t2i(p):
         "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": p.prompt}},
         "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": p.negative}},
         "6": {"class_type": "EmptyFlux2LatentImage",
-              "inputs": {"width": p.w, "height": p.h, "batch_size": p.batch}},
+              "inputs": {"width": gen_w, "height": gen_h, "batch_size": p.batch}},
         "7": {"class_type": "KSampler", "inputs": {
             "model": ["1", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["6", 0],
             "seed": p.seed, "steps": p.steps, "cfg": p.cfg,
@@ -89,10 +92,17 @@ def build_edit(p, refs, sizes):
         ref_inputs["images.image%d" % i] = [str(100 + i), 0]
     # ReferenceMultiLatent liefert positive, negative UND das leere Latent -
     # ein eigener EmptyFlux2LatentImage-Knoten ist hier nicht noetig.
+    # Das Latent kommt aus der Referenz, also bestimmt ihre Flaeche die
+    # Ausgabegroesse: bei dit muss sie das Ziel sein (x scale^2), bei post-dit
+    # die Basis.
+    area, _ = ref_area_mp(p, sizes)
+    if p.scale_mode == "dit":
+        area *= p.scale ** 2
+    mp = area / 1048576.0
     g["20"] = {"class_type": "ReferenceMultiLatent", "inputs": {
         "positive": ["4", 0], "negative": ["6", 0], "vae": ["3", 0],
-        "resolution": "resize" if p.ref_mp else "keep resolution",
-        **({"resolution.megapixels": p.ref_mp} if p.ref_mp else {}),
+        "resolution": "resize" if mp else "keep resolution",
+        **({"resolution.megapixels": round(mp, 4)} if mp else {}),
         **ref_inputs}}
     g["21"] = {"class_type": "KSampler", "inputs": {
         "model": ["1", 0], "positive": ["20", 0], "negative": ["20", 1], "latent_image": ["20", 2],
@@ -133,7 +143,7 @@ def ref_area_mp(p, sizes):
 def expected_output(p, refs, sizes):
     """Erwartete Ausgabegroesse - dieselbe Logik wie der Graph."""
     if not refs:
-        if p.scale > 1 and p.scale_mode == "post-dit":
+        if p.scale > 1:
             return int(p.w * p.scale), int(p.h * p.scale)
         return p.w, p.h
     area, aspect = ref_area_mp(p, sizes)
@@ -161,10 +171,11 @@ def main():
                     help="Default er_sde. Das offizielle Editing-Template nutzt euler.")
     ap.add_argument("--scheduler", default=PROFILE["scheduler"])
     ap.add_argument("--scale", type=float, default=1.0,
-                    help="Zielfaktor (Default 1). Wirkt nur mit --scale-mode post-dit "
-                         "(DiT klein, danach KI-Upscale) oder upscale-no-dit (nur Upscale).")
+                    help="Zielfaktor (Default 1): Ziel = Basis x Faktor. Wer das Ziel "
+                         "erzeugt, sagt --scale-mode.")
     ap.add_argument("--scale-mode", default="post-dit", metavar="MODUS",
-                    help="post-dit (post, Default): DiT in Basisgroesse + KI-Upscale; "
+                    help="dit (regen): DiT erzeugt die Zielgroesse direkt; "
+                         "post-dit (post, Default): DiT in Basisgroesse + KI-Upscale auf das Ziel; "
                          "upscale-no-dit (upscale): nur KI-Upscale, kein DiT (braucht eine Referenz)")
     ap.add_argument("--ref-mp", type=float, default=PROFILE["ref_mp"], metavar="MP",
                     help="Zielgroesse JEDES Referenzbildes vor dem Encoding, in Megapixeln "
@@ -190,8 +201,8 @@ def main():
     mode_name = MODE_ALIASES.get(str(p.scale_mode).lower())
     if mode_name is None:
         hint = MODE_HELP.get(str(p.scale_mode).lower())
-        raise SystemExit("--scale-mode '%s' gibt es bei flux3 nicht%s. Erlaubt: post-dit (post), "
-                         "upscale-no-dit (upscale)"
+        raise SystemExit("--scale-mode '%s' gibt es bei flux3 nicht%s. Erlaubt: dit (regen), "
+                         "post-dit (post), upscale-no-dit (upscale)"
                          % (p.scale_mode, " - " + hint if hint else ""))
     p.scale_mode = mode_name
 

@@ -2,12 +2,11 @@
 """flux2.py - FLUX.2-Klein Text-to-Image UND Image-Editing gegen eine ComfyUI-Instanz.
 
 Zielgroesse = Basisgroesse x --scale (Default 1).  Bei Referenzen ist die Basis
-die Eingabe, bei t2i gilt --base-size.  Der --scale-mode bestimmt den Weg:
+die Eingabe, bei t2i gilt --base-size.  Der --scale-mode bestimmt NUR den Weg
+dorthin, nicht die Groesse:
 
   post-dit (post)      DiT rechnet in Basisgroesse, das Ergebnis wird mit dem
                        KI-Upscaler vergroessert      -> schnell, treu
-  pre-dit (pre)        Referenz wird zuerst geupscaled, dann refine in Zielgroesse
-                                               -> treu + echte Details
   dit (regen)          DiT generiert direkt in Zielgroesse  -> kreativ
   upscale-no-dit (upscale)  kein DiT, reines KI-Upscaling   -> fuer vorhandene Bilder
 
@@ -16,7 +15,7 @@ Beispiele:
   flux2 "ein Igel mit Partyhut" --base-size 1280x720 -o breit.png
   flux2 "change the party hat to blue" --image igel.png -o blau.png
   flux2 "mehr Details" --image foto.png --scale 4 -o foto-4x.png
-  flux2 "mehr Details" --image foto.png --scale 4 --scale-mode pre -o scharf.png
+  flux2 "mehr Details" --image foto.png --scale 4 --ref-mp 2 -o scharf.png
   flux2 "vorhandenes Foto aufwerten" --image foto.png --scale 2 --scale-mode upscale
   flux2 "combine image1 and image2" --image a.png --image https://example.com/b.jpg
   flux2 "mit Workflow-Info" --metadata -o archiv.png
@@ -43,14 +42,13 @@ PROFILES = {
 # Lange und Kurzformen der Skalierungs-Modi
 MODE_ALIASES = {
     "post-dit": "post-dit", "post": "post-dit",
-    "pre-dit": "pre-dit", "pre": "pre-dit",
     "dit": "dit", "regen": "dit",
     "upscale-no-dit": "upscale-no-dit", "upscale": "upscale-no-dit",
 }
 
 Replaced.HINT = {
     "--size": "--base-size (t2i-Basis) und --scale (Zielfaktor)",
-    "--pre-upscale": "--scale N --scale-mode pre-dit",
+    "--pre-upscale": "--ref-mp (Groesse der Referenzen)",
     "--post-upscale": "--scale N --scale-mode post-dit",
 }
 
@@ -115,21 +113,29 @@ def build_edit(p, refs, sizes=None):
     bw, bh = sizes[0] if base_known else (p.w, p.h)
     if not base_known:
         print("Hinweis: Bildmasse nicht ermittelbar - Basis = --base-size.")
+    elif p.ref_mp:
+        # --ref-mp verkleinert/vergroessert die Referenz - die Basis (und damit
+        # die Ausgabegroesse) folgt der skalierten Referenz, nicht dem Original.
+        aspect = bw / float(bh)
+        area = p.ref_mp * 1048576.0
+        bw = int(round((area * aspect) ** 0.5)) // 16 * 16
+        bh = int(round((area / aspect) ** 0.5)) // 16 * 16
     tw, th = target_dims(bw, bh, p.scale)
     post = p.scale_mode == "post-dit" and (tw, th) != (bw, bh)
     gen_w, gen_h = (bw, bh) if post else (tw, th)
 
+    # --ref-mp > 0: jede Referenz auf diese Flaeche (Lanczos).
+    # --ref-mp = 0: Originalmasse, bei >4 MP gedeckelt (wie bisher).
     ref_mps = []
     for s in sizes:
-        if s:
-            mp = (s[0] * s[1]) / 1048576.0
-            if p.scale_mode == "pre-dit":
-                mp = mp * p.scale ** 2
-            ref_mps.append(round(min(mp, 4.0), 3))
+        if p.ref_mp:
+            ref_mps.append(round(p.ref_mp, 3))
+        elif s:
+            ref_mps.append(round(min((s[0] * s[1]) / 1048576.0, 4.0), 3))
         else:
             ref_mps.append(round(min(gen_w * gen_h / 1048576.0, 4.0), 3))
     while len(ref_mps) < len(refs):
-        ref_mps.append(round(min(gen_w * gen_h / 1048576.0, 4.0), 3))
+        ref_mps.append(round(p.ref_mp if p.ref_mp else min(gen_w * gen_h / 1048576.0, 4.0), 3))
 
     g = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": p.model, "weight_dtype": "default"}},
@@ -148,21 +154,14 @@ def build_edit(p, refs, sizes=None):
         "26": {"class_type": "VAEDecode", "inputs": {"samples": ["25", 0], "vae": ["3", 0]}},
         "27": {"class_type": "SaveImage", "inputs": {"images": ["26", 0], "filename_prefix": p.prefix}},
     }
-    if p.scale_mode == "pre-dit":
-        g["30"] = {"class_type": "UpscaleModelLoader", "inputs": {"model_name": UPSCALE_MODEL}}
     cond = ["4", 0]
     for i, name in enumerate(refs):
         lid, sid, eid, rid = 100 + i, 110 + i, 120 + i, 130 + i
         g[str(lid)] = {"class_type": "LoadImage", "inputs": {"image": name}}
         src = [str(lid), 0]
-        if p.scale_mode == "pre-dit":
-            uid = 150 + i
-            g[str(uid)] = {"class_type": "ImageUpscaleWithModel",
-                           "inputs": {"upscale_model": ["30", 0], "image": src}}
-            src = [str(uid), 0]
         g[str(sid)] = {"class_type": "ImageScaleToTotalPixels",
                        "inputs": {"image": src,
-                                  "upscale_method": "lanczos" if p.scale_mode == "pre-dit" else "nearest-exact",
+                                  "upscale_method": "lanczos" if p.ref_mp else "nearest-exact",
                                   "megapixels": ref_mps[i], "resolution_steps": 16}}
         g[str(eid)] = {"class_type": "VAEEncode", "inputs": {"pixels": [str(sid), 0], "vae": ["3", 0]}}
         g[str(rid)] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": cond, "latent": [str(eid), 0]}}
@@ -224,9 +223,12 @@ def main():
                     help="Zielgroesse = Basisgroesse * Faktor (Default: 1)")
     ap.add_argument("--scale-mode", default="post-dit", metavar="MODUS",
                     help="post-dit (post, Default): DiT in Basisgroesse + KI-Upscale; "
-                         "pre-dit (pre): Referenz erst upscaled, dann Refine; "
                          "dit (regen): DiT direkt in Zielgroesse; "
                          "upscale-no-dit (upscale): nur KI-Upscale, kein DiT")
+    ap.add_argument("--ref-mp", type=float, default=0.0, metavar="MP",
+                    help="Zielgroesse JEDER Referenz vor dem Encoding, in Megapixeln "
+                         "(1.0 ~ 1024x1024). Skaliert mit Lanczos, Seitenverhaeltnis bleibt. "
+                         "0 (Default) = Originalmasse behalten (bei >4 MP gedeckelt).")
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--metadata", action="store_true",
                     help="Workflow/Prompts in die PNG-Metadaten schreiben "
@@ -251,8 +253,8 @@ def main():
 
     p.scale_mode = MODE_ALIASES.get(str(p.scale_mode).lower())
     if p.scale_mode is None:
-        raise SystemExit("unbekannter --scale-mode. Erlaubt: post-dit (post), pre-dit (pre), "
-                         "dit (regen), upscale-no-dit (upscale)")
+        raise SystemExit("unbekannter --scale-mode. Erlaubt: post-dit (post), dit (regen), "
+                         "upscale-no-dit (upscale)")
     if p.scale <= 0:
         raise SystemExit("--scale muss > 0 sein")
     if p.scale <= 1 and p.scale_mode == "upscale-no-dit":
@@ -276,7 +278,7 @@ def main():
     p.w -= p.w % 16
     p.h -= p.h % 16
 
-    if p.scale_mode in ("pre-dit", "upscale-no-dit") and not (p.refs or []):
+    if p.scale_mode == "upscale-no-dit" and not (p.refs or []):
         raise SystemExit("%s braucht mindestens eine Referenz (--image/--url/--server-image)"
                          % p.scale_mode)
     refs, sizes = collect_refs(p.server, p.refs)
@@ -289,7 +291,7 @@ def main():
         graph = build_upscale_only(p, refs[0], bw, bh)
     else:
         checks = [("UNETLoader", "unet_name", p.model), ("CLIPLoader", "clip_name", p.te)]
-        if p.scale_mode == "pre-dit" or (p.scale_mode == "post-dit" and p.scale != 1):
+        if p.scale_mode == "post-dit" and p.scale != 1:
             checks.append(("UpscaleModelLoader", "model_name", UPSCALE_MODEL))
         preflight(p.server, checks)
         graph = build_edit(p, refs, sizes) if refs else build_t2i(p)

@@ -130,7 +130,7 @@ flux3 "..." --seed 42 --json
 
 # FLUX.2 mit automatischer Profilwahl (4b auf 12 GB, 9b ab ~15 GB VRAM)
 flux2 "ein Igel mit Partyhut" -o igel2.png
-flux2 "mehr Details" --image foto.png --scale 2 --scale-mode pre-dit -o scharf.png
+flux2 "mehr Details" --image foto.png --scale 2 --ref-mp 2 -o scharf.png
 
 # Cloud, ohne VRAM-Bedarf
 flux3-nim "a lighthouse in a storm" --size 1280x720 -o leuchtturm.jpg
@@ -147,17 +147,26 @@ flux3 "unused" --image foto.png --scale 2 --scale-mode upscale -o foto-2x.png
 - **`--size` beim Editing** wird ignoriert; die Größe ergibt sich aus der
   Referenz mal `--ref-mp` (`0` = Originalmaße). Die CLI sagt das
   ausdrücklich, statt es stillschweigend zu schlucken.
+- **Zielgröße und Weg sind getrennt.** Die Zielgröße ergibt sich aus `--size`
+  (bzw. `--base-size`) und `--scale` – bei Referenzen ist die Basis die
+  Referenzfläche. Der `--scale-mode` bestimmt nur, **wer** diese Zielgröße
+  erzeugt:
+
+  | Modus | Wer erzeugt das Ziel | Typische Zeit (2048²) |
+  |---|---|---|
+  | `dit` (regen) | der DiT selbst | 170 s |
+  | `post-dit` (post, Default) | DiT in Basisgröße + KI-Upscale | 48 s |
+  | `upscale-no-dit` (upscale) | nur KI-Upscale, kein DiT | 12 s |
+
+  `pre-dit` gibt es nicht mehr: die Referenzgröße steuert `--ref-mp`, nicht der
+  Modus.
 - **`--ref-mp`** steuert die Größe *jeder Referenz* vor dem Encoding:
   Zielfläche = `MP` × 1024², Seitenverhältnis bleibt, **Lanczos** – also eine
   Interpolation, keine Detailgewinnung. Ein kleines Bild auf 1 MP hochzuziehen
   bringt kein neues Detail, kostet aber Latent-Tokens. `1.0` ≈ 1024×1024
-  (genau 1,048576 MP), `0` = Originalmaße behalten.
-- **`--scale` bei `flux3`** kennt nur zwei Modi, weil der Rest bei FLUX.3 anders
-  liegt: `post-dit` (Default) lässt den DiT in Basisgröße rechnen und vergrößert
-  danach per KI-Upscaler; `upscale-no-dit` macht nur den Upscale (braucht eine
-  Referenz). `dit` ist hier schlicht `--size WxH` – der DiT rechnet direkt in der
-  Zielgröße. `pre-dit` gibt es nicht: dafür ist `--ref-mp` da.
-  Beim Editing ist die Zielgröße `Referenzfläche × scale²`.
+  (genau 1,048576 MP), `0` = Originalmaße behalten. Bei Referenzen folgt die
+  Ausgabegröße dieser Fläche (× `--scale`), weil das Latent aus der Referenz
+  kommt.
 - **Sampler**: Default `er_sde` mit 15 Schritten (offizielles T2I-Template).
   Das offizielle Editing-Template nutzt `euler` mit 16 Schritten –
   überschreibbar mit `--sampler euler --steps 16`.
