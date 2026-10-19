@@ -288,6 +288,51 @@ def strip_png_metadata(data):
 
 # ---------------------------------------------------------------- Ausfuehrung
 
+def post_action(server, path, payload, timeout=30):
+    """POST, dessen Antwort kein JSON ist: /interrupt und /queue liefern einen
+    leeren Body - json.load wuerde daran scheitern."""
+    req = urllib.request.Request(server + path, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        r.read(1)
+
+
+def running_prompt_id(server):
+    """prompt_id des Auftrags, der gerade rechnet - oder None."""
+    try:
+        running = get_json(server, "/queue").get("queue_running") or []
+        return running[0][1] if running else None
+    except Exception:
+        return None
+
+
+def cancel_prompt(server, pid):
+    """Bricht NUR den eigenen Auftrag ab und raeumt ihn aus der Queue.
+
+    /interrupt ist global: es stoppt, was gerade rechnet - nicht den Auftrag mit
+    der eigenen prompt_id. Auf einem Server, auf dem auch andere Auftraege laufen,
+    wuerde ein blindes /interrupt fremde Arbeit toeten. Deshalb erst pruefen, wer
+    laeuft; ein eigener, noch wartender Eintrag wird nur aus der Queue entfernt."""
+    stopped = []
+    try:
+        current = running_prompt_id(server)
+        if current == pid:
+            post_action(server, "/interrupt", {})
+            stopped.append("interrupt")
+        elif current:
+            stopped.append("anderer Auftrag laeuft (%s) - nicht abgebrochen" % current[:8])
+        else:
+            stopped.append("nichts lief")
+    except Exception as e:
+        stopped.append("interrupt fehlgeschlagen: %s" % e)
+    try:
+        post_action(server, "/queue", {"delete": [pid]})
+        stopped.append("queue-delete")
+    except Exception:
+        pass
+    return ", ".join(stopped)
+
+
 def run_graph(server, graph, timeout, out=None, prefix="flux", metadata=False, quiet=False):
     """Graph abgeben, auf das Ergebnis warten, Bilder speichern.
     Liefert (pfade, sekunden, prompt_id)."""
@@ -297,13 +342,23 @@ def run_graph(server, graph, timeout, out=None, prefix="flux", metadata=False, q
     pid = res["prompt_id"]
     t0 = time.time()
     hist = {}
-    while time.time() - t0 < timeout:
-        hist = get_json(server, "/history/" + pid)
-        if pid in hist:
-            break
-        time.sleep(2)
-    else:
-        raise SystemExit("Timeout nach %ds" % timeout)
+    try:
+        while time.time() - t0 < timeout:
+            hist = get_json(server, "/history/" + pid)
+            if pid in hist:
+                break
+            time.sleep(2)
+        else:
+            # Ohne Abbruch rechnet der Server weiter und belegt die GPU.
+            what = cancel_prompt(server, pid)
+            raise SystemExit(
+                "Timeout nach %ds - Auftrag abgebrochen (%s, prompt_id=%s).\n"
+                "  Fuer laengere Laeufe: --timeout erhoehen. Laeuft trotzdem noch etwas:\n"
+                "    curl -s -X POST %s/interrupt -d '{}' -H 'Content-Type: application/json'"
+                % (timeout, what, pid, server))
+    except KeyboardInterrupt:
+        what = cancel_prompt(server, pid)
+        raise SystemExit("Abgebrochen (%s, prompt_id=%s)" % (what, pid))
 
     entry = hist.get(pid, {})
     status = entry.get("status", {})
