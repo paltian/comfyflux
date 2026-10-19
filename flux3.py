@@ -256,7 +256,6 @@ def main():
         raise SystemExit("--size gibt es beim Editing nicht: die Groesse kommt aus der "
                          "Referenz. Nutze --ref-mp (Basis) und --scale (Faktor).")
 
-    base = target = None
     if p.scale_mode == "upscale-no-dit":
         if not refs:
             raise SystemExit("upscale-no-dit braucht eine Referenz (--image/--url/--server-image)")
@@ -264,12 +263,8 @@ def main():
             raise SystemExit("upscale-no-dit braucht --scale > 1")
         if len(refs) > 1:
             print("Hinweis: upscale-no-dit nutzt nur die erste Referenz (%d angegeben)." % len(refs))
-        aspect = sizes[0][0] / float(sizes[0][1]) if (sizes and sizes[0]) else 1.0
-        base = dims_for(p.ref_mp * 1048576.0, aspect)
-        target = dims_for(p.ref_mp * p.scale ** 2 * 1048576.0, aspect)
-    else:
-        bw, bh, tw, th, base_mp, target_mp = resolve_sizes(p, refs, sizes)
-        base, target = (bw, bh), (tw, th)
+    bw, bh, tw, th, base_mp, target_mp = resolve_sizes(p, refs, sizes)
+    base, target = (bw, bh), (tw, th)
     needs_upscaler = p.scale_mode == "upscale-no-dit" or (p.scale_mode == "post-dit" and target != base)
 
     checks = [(GGUF_NODE, "unet_name", p.model), ("CLIPLoader", "clip_name", p.te),

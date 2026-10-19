@@ -304,6 +304,10 @@ def resolve_sizes(p, refs, sizes):
     Basis x --scale. Wer das Ziel erzeugt, sagt --scale-mode.
 
     Liefert (basis_w, basis_h, ziel_w, ziel_h, basis_mp, ziel_mp)."""
+    if not refs and not p.ref_mp:
+        raise SystemExit("--ref-mp 0 bedeutet \"Originalmasse der Referenz\" - beim "
+                         "Text-to-Image gibt es keine Referenz. Nutze --ref-mp N (> 0) "
+                         "oder --size WxH.")
     aspect = 1.0
     if refs and sizes and sizes[0]:
         aspect = sizes[0][0] / float(sizes[0][1])
