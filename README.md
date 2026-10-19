@@ -135,8 +135,15 @@ flux2 "mehr Details" --image foto.png --scale 2 --ref-mp 2 -o scharf.png
 # Cloud, ohne VRAM-Bedarf
 flux3-nim "a lighthouse in a storm" --size 1280x720 -o leuchtturm.jpg
 
-# FLUX.3 gross: DiT bei 1 MP, danach KI-Upscale auf das Doppelte
-flux3 "..." --size 1024x1024 --scale 2 -o gross.png
+# gross: Basis 1 MP, Ziel 4 MP - DiT klein, danach KI-Upscale
+flux3 "..." --scale 2 -o gross.png
+flux2 "..." --scale 2 -o gross2.png
+
+# gross ohne Upscaler: der DiT rechnet direkt in der Zielgroesse (langsamer)
+flux3 "..." --scale 2 --scale-mode dit -o gross-dit.png
+
+# festes Format statt Faktor (schliesst --scale aus)
+flux3 "..." --size 1280x720 -o breit.png
 
 # vorhandenes Bild nur aufwerten (kein DiT)
 flux3 "unused" --image foto.png --scale 2 --scale-mode upscale -o foto-2x.png
@@ -144,9 +151,14 @@ flux3 "unused" --image foto.png --scale 2 --scale-mode upscale -o foto-2x.png
 
 ## Hinweise
 
-- **`--size` beim Editing** wird ignoriert; die Größe ergibt sich aus der
-  Referenz mal `--ref-mp` (`0` = Originalmaße). Die CLI sagt das
-  ausdrücklich, statt es stillschweigend zu schlucken.
+- **`--size` und `--scale` schließen sich aus** – argparse verhindert die
+  Kombination. `--size WxH` ist das Ziel absolut, `--scale N` das Ziel als
+  Faktor auf die Basis (`--ref-mp`). Ohne beide ist das Ziel die Basis selbst.
+  Beim Editing gibt es kein `--size`: dort kommt die Größe aus der Referenz.
+- **`--ref-mp`** ist die Basisfläche in Megapixeln (Default 1.0 ≈ 1024×1024):
+  bei Referenzen deren Größe (Lanczos, Format bleibt), bei t2i die Basis des
+  DiT (1:1). `0` = Originalmaße der Referenz. Bei t2i ohne `--size` ist das
+  Ergebnis quadratisch.
 - **Zielgröße und Weg sind getrennt.** Die Zielgröße ergibt sich aus `--size`
   (bzw. `--base-size`) und `--scale` – bei Referenzen ist die Basis die
   Referenzfläche. Der `--scale-mode` bestimmt nur, **wer** diese Zielgröße

@@ -288,6 +288,43 @@ def strip_png_metadata(data):
 
 # ---------------------------------------------------------------- Ausfuehrung
 
+def dims_for(area_px, aspect):
+    """Breite/Hoehe fuer eine Flaeche mit gegebenem Seitenverhaeltnis, 16er-Raster."""
+    w = int(round((area_px * aspect) ** 0.5))
+    h = int(round((area_px / aspect) ** 0.5))
+    return max(16, w - w % 16), max(16, h - h % 16)
+
+
+def resolve_sizes(p, refs, sizes):
+    """Basis- und Zielgroesse fuer beide CLIs.
+
+    --size und --scale schliessen sich aus (argparse erzwingt das). Basis ist
+    --ref-mp: bei Referenzen deren Flaeche mit dem Format der Referenz, bei t2i
+    1:1. 0 = Originalmasse der Referenz. Ziel ist --size (absolut) oder
+    Basis x --scale. Wer das Ziel erzeugt, sagt --scale-mode.
+
+    Liefert (basis_w, basis_h, ziel_w, ziel_h, basis_mp, ziel_mp)."""
+    aspect = 1.0
+    if refs and sizes and sizes[0]:
+        aspect = sizes[0][0] / float(sizes[0][1])
+    if p.ref_mp:
+        base_area = p.ref_mp * 1048576.0
+    elif refs and sizes and sizes[0]:
+        base_area = float(sizes[0][0] * sizes[0][1])
+    else:
+        base_area = 1048576.0
+    if p.scale is None:
+        if p.size:
+            tw, th = parse_size(p.size)
+        else:
+            tw, th = dims_for(base_area, aspect)
+        bw, bh = tw, th
+    else:
+        bw, bh = dims_for(base_area, aspect)
+        tw, th = dims_for(base_area * p.scale ** 2, aspect)
+    return bw, bh, tw, th, base_area / 1048576.0, (tw * th) / 1048576.0
+
+
 def add_upscale_tail(g, src, target_w, target_h, save_node, base=40):
     """KI-Upscaler + exakte Zielgroesse VOR den SaveImage-Knoten haengen.
     src ist der [node, slot]-Verweis auf das zu vergroessernde Bild."""
