@@ -25,7 +25,8 @@ import argparse, json, os, random, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # auch als Symlink startbar
 
-from comfy_client import (DEFAULT_SERVER, AddRef, Replaced, UPSCALE_MODEL, collect_refs, ensure_server,
+from comfy_client import (DEFAULT_SERVER, UPSCALE_MODEL, AddRef, Replaced, add_upscale_tail,
+                          collect_refs, ensure_server,
                           get_json, out_path, preflight, run_graph, widget_choices)
 
 PROFILES = {
@@ -65,17 +66,6 @@ def note_output(p, out_w, out_h, note):
     if out_w * out_h > 4_000_000:
         print("Hinweis: >4 MP - das wird langsam und braucht VRAM.")
 
-def add_upscale_tail(g, p, src, target_w, target_h, save_node):
-    """KI-Upscaler + exakte Zielgroesse VOR den SaveImage-Knoten."""
-    g["40"] = {"class_type": "UpscaleModelLoader", "inputs": {"model_name": UPSCALE_MODEL}}
-    g["41"] = {"class_type": "ImageUpscaleWithModel",
-               "inputs": {"upscale_model": ["40", 0], "image": src}}
-    g["42"] = {"class_type": "ImageScaleToTotalPixels",
-               "inputs": {"image": ["41", 0], "upscale_method": "lanczos",
-                          "megapixels": round(target_w * target_h / 1048576.0, 3),
-                          "resolution_steps": 16}}
-    g[save_node]["inputs"]["images"] = ["42", 0]
-
 def build_upscale_only(p, ref_name, base_w, base_h):
     tw, th = target_dims(base_w, base_h, p.scale)
     note_output(p, tw, th, "(nur KI-Upscale, kein DiT)")
@@ -113,7 +103,7 @@ def build_t2i(p):
         "14": {"class_type": "SaveImage", "inputs": {"images": ["13", 0], "filename_prefix": p.prefix}},
     }
     if post:
-        add_upscale_tail(g, p, ["13", 0], tw, th, "14")
+        add_upscale_tail(g, ["13", 0], tw, th, "14")
         note_output(p, tw, th, "DiT %dx%d + KI-Upscale" % (gen_w, gen_h))
     else:
         note_output(p, tw, th, "DiT in Zielgroesse" if (tw, th) != (p.w, p.h) else "")
@@ -180,7 +170,7 @@ def build_edit(p, refs, sizes=None):
     g["20"] = {"class_type": "CFGGuider",
                "inputs": {"model": ["1", 0], "positive": cond, "negative": ["6", 0], "cfg": p.cfg}}
     if post:
-        add_upscale_tail(g, p, ["26", 0], tw, th, "27")
+        add_upscale_tail(g, ["26", 0], tw, th, "27")
         note_output(p, tw, th, "DiT %dx%d + KI-Upscale" % (gen_w, gen_h))
     else:
         note_output(p, tw, th, "DiT in Zielgroesse" if (tw, th) != (bw, bh) else "Basisgroesse")

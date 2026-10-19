@@ -288,6 +288,20 @@ def strip_png_metadata(data):
 
 # ---------------------------------------------------------------- Ausfuehrung
 
+def add_upscale_tail(g, src, target_w, target_h, save_node, base=40):
+    """KI-Upscaler + exakte Zielgroesse VOR den SaveImage-Knoten haengen.
+    src ist der [node, slot]-Verweis auf das zu vergroessernde Bild."""
+    a, b, c = str(base), str(base + 1), str(base + 2)
+    g[a] = {"class_type": "UpscaleModelLoader", "inputs": {"model_name": UPSCALE_MODEL}}
+    g[b] = {"class_type": "ImageUpscaleWithModel",
+            "inputs": {"upscale_model": [a, 0], "image": src}}
+    g[c] = {"class_type": "ImageScaleToTotalPixels",
+            "inputs": {"image": [b, 0], "upscale_method": "lanczos",
+                       "megapixels": round(target_w * target_h / 1048576.0, 3),
+                       "resolution_steps": 16}}
+    g[save_node]["inputs"]["images"] = [c, 0]
+
+
 def post_action(server, path, payload, timeout=30):
     """POST, dessen Antwort kein JSON ist: /interrupt und /queue liefern einen
     leeren Body - json.load wuerde daran scheitern."""

@@ -28,8 +28,15 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # auch als Symlink startbar
 
-from comfy_client import (AddRef, add_common_args, collect_refs, ensure_server, node_available,
-                          out_path, parse_size, preflight, run_graph)
+from comfy_client import (UPSCALE_MODEL, AddRef, add_common_args, add_upscale_tail, collect_refs,
+                          ensure_server, node_available, out_path, parse_size, preflight, run_graph)
+
+MODE_ALIASES = {"post-dit": "post-dit", "post": "post-dit",
+                "upscale-no-dit": "upscale-no-dit", "upscale": "upscale-no-dit"}
+MODE_HELP = {
+    "dit": "bei flux3 einfach --size WxH (ohne --scale) - der DiT rechnet direkt in der Zielgroesse",
+    "pre-dit": "nicht unterstuetzt; --ref-megapixels skaliert Referenzen (Lanczos)",
+}
 
 PROFILE = {
     "model": "flux-3-image-klein-UD-Q5_K_XL.gguf",
@@ -45,7 +52,7 @@ GGUF_NODE = "UnetLoaderGGUF"
 
 
 def build_t2i(p):
-    return {
+    g = {
         "1": {"class_type": GGUF_NODE, "inputs": {"unet_name": p.model}},
         "2": {"class_type": "CLIPLoader",
               "inputs": {"clip_name": p.te, "type": "flux3", "device": "default"}},
@@ -61,6 +68,9 @@ def build_t2i(p):
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
         "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": p.prefix}},
     }
+    if p.scale > 1 and p.scale_mode == "post-dit":
+        add_upscale_tail(g, ["8", 0], int(p.w * p.scale), int(p.h * p.scale), "9")
+    return g
 
 
 def build_edit(p, refs):
@@ -90,7 +100,27 @@ def build_edit(p, refs):
         "sampler_name": p.sampler, "scheduler": p.scheduler, "denoise": 1.0}}
     g["22"] = {"class_type": "VAEDecode", "inputs": {"samples": ["21", 0], "vae": ["3", 0]}}
     g["23"] = {"class_type": "SaveImage", "inputs": {"images": ["22", 0], "filename_prefix": p.prefix}}
+    if p.scale > 1 and p.scale_mode == "post-dit":
+        # Ausgabegroesse kommt aus der Referenz: Flaeche x scale^2
+        mp = p.ref_megapixels or p.ref_base_mp
+        tw = th = int(round((mp * p.scale ** 2 * 1048576.0) ** 0.5))
+        add_upscale_tail(g, ["22", 0], tw, th, "23")
     return g
+
+
+def build_upscale_only(p, ref_name):
+    """Kein DiT: nur KI-Upscale der ersten Referenz."""
+    g = {"1": {"class_type": "LoadImage", "inputs": {"image": ref_name}},
+         "5": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": p.prefix}}}
+    side = target_side(p)
+    add_upscale_tail(g, ["1", 0], side, side, "5")
+    return g
+
+
+def target_side(p):
+    """Kantenlaenge des Ziels aus Referenzflaeche x scale^2 (quadratisch genaehert)."""
+    mp = (p.ref_megapixels or p.ref_base_mp) * p.scale ** 2
+    return int(round((mp * 1048576.0) ** 0.5))
 
 
 def main():
@@ -108,6 +138,12 @@ def main():
     ap.add_argument("--sampler", default=PROFILE["sampler"],
                     help="Default er_sde. Das offizielle Editing-Template nutzt euler.")
     ap.add_argument("--scheduler", default=PROFILE["scheduler"])
+    ap.add_argument("--scale", type=float, default=1.0,
+                    help="Zielfaktor (Default 1). Wirkt nur mit --scale-mode post-dit "
+                         "(DiT klein, danach KI-Upscale) oder upscale-no-dit (nur Upscale).")
+    ap.add_argument("--scale-mode", default="post-dit", metavar="MODUS",
+                    help="post-dit (post, Default): DiT in Basisgroesse + KI-Upscale; "
+                         "upscale-no-dit (upscale): nur KI-Upscale, kein DiT (braucht eine Referenz)")
     ap.add_argument("--ref-megapixels", type=float, default=PROFILE["ref_megapixels"],
                     help="Referenzbilder vor dem Encoding auf diese Groesse bringen "
                          "(1.0 ~ 1024x1024, Default). 0 = Originalmasse behalten.")
@@ -126,24 +162,63 @@ def main():
                          "  git clone https://github.com/city96/ComfyUI-GGUF "
                          "~/dev/comfyui/custom_nodes/ComfyUI-GGUF" % GGUF_NODE)
 
-    refs, _ = collect_refs(p.server, p.refs)
+    if p.scale <= 0:
+        raise SystemExit("--scale muss > 0 sein")
+    mode_name = MODE_ALIASES.get(str(p.scale_mode).lower())
+    if mode_name is None:
+        hint = MODE_HELP.get(str(p.scale_mode).lower())
+        raise SystemExit("--scale-mode '%s' gibt es bei flux3 nicht%s. Erlaubt: post-dit (post), "
+                         "upscale-no-dit (upscale)"
+                         % (p.scale_mode, " - " + hint if hint else ""))
+    p.scale_mode = mode_name
+
+    refs, sizes = collect_refs(p.server, p.refs)
     if refs and p.size != "1024x1024":
         print("Hinweis: --size wird beim Editing ignoriert "
               "(Groesse = Referenz x --ref-megapixels).")
+    # Basisflaeche der Referenz: aus --ref-megapixels, sonst aus den echten Massen
+    p.ref_base_mp = 1.0
+    if sizes and sizes[0]:
+        w0, h0 = sizes[0]
+        p.ref_base_mp = (w0 * h0) / 1048576.0 if not p.ref_megapixels else 1.0
 
-    preflight(p.server, [(GGUF_NODE, "unet_name", p.model),
-                         ("CLIPLoader", "clip_name", p.te),
-                         ("VAELoader", "vae_name", p.vae)])
-    graph = build_edit(p, refs) if refs else build_t2i(p)
-    mode = "edit" if refs else "t2i"
+    needs_upscaler = p.scale > 1 and p.scale_mode == "post-dit" or p.scale_mode == "upscale-no-dit"
+    if p.scale_mode == "upscale-no-dit":
+        if not refs:
+            raise SystemExit("upscale-no-dit braucht eine Referenz (--image/--url/--server-image)")
+        if p.scale <= 1:
+            raise SystemExit("upscale-no-dit braucht --scale > 1")
+        if len(refs) > 1:
+            print("Hinweis: upscale-no-dit nutzt nur die erste Referenz (%d angegeben)." % len(refs))
+
+    checks = [(GGUF_NODE, "unet_name", p.model), ("CLIPLoader", "clip_name", p.te),
+              ("VAELoader", "vae_name", p.vae)]
+    if needs_upscaler:
+        checks.append(("UpscaleModelLoader", "model_name", UPSCALE_MODEL))
+    preflight(p.server, checks)
+
+    if p.scale_mode == "upscale-no-dit":
+        graph, mode = build_upscale_only(p, refs[0]), "upscale"
+    else:
+        graph = build_edit(p, refs) if refs else build_t2i(p)
+        mode = "edit" if refs else "t2i"
     dest = out_path(p.out, p.prefix, p.seed)
 
     t0 = time.time()
     saved, secs, pid = run_graph(p.server, graph, p.timeout, out=dest, prefix=p.prefix,
                                  metadata=p.metadata, quiet=p.json)
+    if p.scale > 1 and p.scale_mode == "post-dit" and not refs:
+        out_w, out_h = int(p.w * p.scale), int(p.h * p.scale)
+    elif p.scale_mode == "upscale-no-dit" or (refs and p.scale > 1):
+        out_w = out_h = target_side(p)
+    else:
+        out_w, out_h = p.w, p.h
+    if not p.json:
+        print("Ziel: %dx%d [%s, scale %.2g]" % (out_w, out_h, p.scale_mode, p.scale))
     if p.json:
-        print(json.dumps({"out": os.path.abspath(saved[0]), "seed": p.seed, "width": p.w,
-                          "height": p.h, "steps": p.steps, "sampler": p.sampler, "mode": mode,
+        print(json.dumps({"out": os.path.abspath(saved[0]), "seed": p.seed, "width": out_w,
+                          "height": out_h, "steps": p.steps, "sampler": p.sampler, "mode": mode,
+                          "scale": p.scale, "scale_mode": p.scale_mode,
                           "refs": len(refs), "seconds": round(secs, 1), "prompt_id": pid,
                           "prompt": p.prompt, "model": p.model}))
     else:
