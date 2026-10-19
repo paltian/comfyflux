@@ -428,7 +428,9 @@ def add_common_args(ap, default_server=None):
     ap.add_argument("--metadata", action="store_true",
                     help="Workflow/Prompts in die PNG-Metadaten schreiben "
                          "(Standard: Metadaten werden entfernt)")
-    ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--timeout", type=int, default=900,
+                    help="Wartezeit in Sekunden auf das Ergebnis (Default: 900). "
+                     "Bei Timeout wird der eigene Auftrag abgebrochen.")
     ap.add_argument("--json", action="store_true", help="Ergebnis als JSON statt Textzeile")
 
 

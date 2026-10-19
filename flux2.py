@@ -247,7 +247,9 @@ def main():
     ap.add_argument("--te", default=None, help="ueberschreibt den Text-Encoder des Profils")
     ap.add_argument("--vae", default=None, help="ueberschreibt den VAE des Profils")
     ap.add_argument("--prefix", default="flux2-klein")
-    ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--timeout", type=int, default=900,
+                    help="Wartezeit in Sekunden auf das Ergebnis (Default: 900). "
+                     "Bei Timeout wird der eigene Auftrag abgebrochen.")
     ap.add_argument("--no-autostart", action="store_true",
                     help="Server nicht selbst starten, auch wenn er lokal eingerichtet ist")
     ap.add_argument("--json", action="store_true", help="Ergebnis als JSON statt Textzeile")
