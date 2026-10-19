@@ -2,7 +2,7 @@
 """flux2.py - FLUX.2-Klein Text-to-Image UND Image-Editing gegen eine ComfyUI-Instanz.
 
 Zielgroesse = Basisgroesse x --scale (Default 1).  Bei Referenzen ist die Basis
-die Eingabe, bei t2i gilt --base-size.  Der --scale-mode bestimmt NUR den Weg
+die Referenz, bei t2i --size oder --ref-mp.  Der --scale-mode bestimmt NUR den Weg
 dorthin, nicht die Groesse:
 
   post-dit (post)      DiT rechnet in Basisgroesse, das Ergebnis wird mit dem
@@ -12,7 +12,7 @@ dorthin, nicht die Groesse:
 
 Beispiele:
   flux2 "ein Igel mit Partyhut" -o igel.png
-  flux2 "ein Igel mit Partyhut" --base-size 1280x720 -o breit.png
+  flux2 "ein Igel mit Partyhut" --size 1280x720 -o breit.png
   flux2 "change the party hat to blue" --image igel.png -o blau.png
   flux2 "mehr Details" --image foto.png --scale 4 -o foto-4x.png
   flux2 "mehr Details" --image foto.png --scale 4 --ref-mp 2 -o scharf.png
@@ -196,7 +196,7 @@ def main():
     ap.add_argument("--cfg", type=float, default=None,
                     help="Guidance (Default: 1.0 distilled, 5.0 base)")
     g_size = ap.add_mutually_exclusive_group()
-    g_size.add_argument("--size", "--base-size", dest="size", default=None, metavar="WxH",
+    g_size.add_argument("--size", default=None, metavar="WxH",
                         help="Zielgroesse absolut (schliesst --scale aus). Ohne Angabe: "
                              "Basis x --scale bzw. die Basis selbst.")
     g_size.add_argument("--scale", type=float, default=None, metavar="N",

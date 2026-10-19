@@ -160,7 +160,7 @@ flux3 "unused" --image foto.png --scale 2 --scale-mode upscale -o foto-2x.png
   DiT (1:1). `0` = Originalmaße der Referenz. Bei t2i ohne `--size` ist das
   Ergebnis quadratisch.
 - **Zielgröße und Weg sind getrennt.** Die Zielgröße ergibt sich aus `--size`
-  (bzw. `--base-size`) und `--scale` – bei Referenzen ist die Basis die
+  und `--scale` – bei Referenzen ist die Basis die
   Referenzfläche. Der `--scale-mode` bestimmt nur, **wer** diese Zielgröße
   erzeugt:
 
