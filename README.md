@@ -145,17 +145,18 @@ flux3 "unused" --image foto.png --scale 2 --scale-mode upscale -o foto-2x.png
 ## Hinweise
 
 - **`--size` beim Editing** wird ignoriert; die Größe ergibt sich aus der
-  Referenz mal `--ref-megapixels` (`0` = Originalmaße). Die CLI sagt das
+  Referenz mal `--ref-mp` (`0` = Originalmaße). Die CLI sagt das
   ausdrücklich, statt es stillschweigend zu schlucken.
-- **`--ref-megapixels`** steuert die Größe *jeder Referenz* vor dem Encoding:
-  Zielfläche = `megapixels` × 1024², Seitenverhältnis bleibt, Lanczos.
-  `1.0` ≈ 1024×1024 (genau 1,048576 MP). Größere Referenzen bringen mehr
-  Detail, kosten aber Rechenzeit und VRAM.
+- **`--ref-mp`** steuert die Größe *jeder Referenz* vor dem Encoding:
+  Zielfläche = `MP` × 1024², Seitenverhältnis bleibt, **Lanczos** – also eine
+  Interpolation, keine Detailgewinnung. Ein kleines Bild auf 1 MP hochzuziehen
+  bringt kein neues Detail, kostet aber Latent-Tokens. `1.0` ≈ 1024×1024
+  (genau 1,048576 MP), `0` = Originalmaße behalten.
 - **`--scale` bei `flux3`** kennt nur zwei Modi, weil der Rest bei FLUX.3 anders
   liegt: `post-dit` (Default) lässt den DiT in Basisgröße rechnen und vergrößert
   danach per KI-Upscaler; `upscale-no-dit` macht nur den Upscale (braucht eine
   Referenz). `dit` ist hier schlicht `--size WxH` – der DiT rechnet direkt in der
-  Zielgröße. `pre-dit` gibt es nicht: dafür ist `--ref-megapixels` da.
+  Zielgröße. `pre-dit` gibt es nicht: dafür ist `--ref-mp` da.
   Beim Editing ist die Zielgröße `Referenzfläche × scale²`.
 - **Sampler**: Default `er_sde` mit 15 Schritten (offizielles T2I-Template).
   Das offizielle Editing-Template nutzt `euler` mit 16 Schritten –

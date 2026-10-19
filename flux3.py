@@ -35,7 +35,7 @@ MODE_ALIASES = {"post-dit": "post-dit", "post": "post-dit",
                 "upscale-no-dit": "upscale-no-dit", "upscale": "upscale-no-dit"}
 MODE_HELP = {
     "dit": "bei flux3 einfach --size WxH (ohne --scale) - der DiT rechnet direkt in der Zielgroesse",
-    "pre-dit": "nicht unterstuetzt; --ref-megapixels skaliert Referenzen (Lanczos)",
+    "pre-dit": "nicht unterstuetzt; --ref-mp skaliert Referenzen (Lanczos)",
 }
 
 PROFILE = {
@@ -46,7 +46,7 @@ PROFILE = {
     "sampler": "er_sde",
     "scheduler": "simple",
     "cfg": 1.0,
-    "ref_megapixels": 1.0,
+    "ref_mp": 1.0,
 }
 GGUF_NODE = "UnetLoaderGGUF"
 
@@ -73,7 +73,7 @@ def build_t2i(p):
     return g
 
 
-def build_edit(p, refs):
+def build_edit(p, refs, sizes):
     g = {
         "1": {"class_type": GGUF_NODE, "inputs": {"unet_name": p.model}},
         "2": {"class_type": "CLIPLoader",
@@ -91,8 +91,8 @@ def build_edit(p, refs):
     # ein eigener EmptyFlux2LatentImage-Knoten ist hier nicht noetig.
     g["20"] = {"class_type": "ReferenceMultiLatent", "inputs": {
         "positive": ["4", 0], "negative": ["6", 0], "vae": ["3", 0],
-        "resolution": "resize" if p.ref_megapixels else "keep resolution",
-        **({"resolution.megapixels": p.ref_megapixels} if p.ref_megapixels else {}),
+        "resolution": "resize" if p.ref_mp else "keep resolution",
+        **({"resolution.megapixels": p.ref_mp} if p.ref_mp else {}),
         **ref_inputs}}
     g["21"] = {"class_type": "KSampler", "inputs": {
         "model": ["1", 0], "positive": ["20", 0], "negative": ["20", 1], "latent_image": ["20", 2],
@@ -102,25 +102,47 @@ def build_edit(p, refs):
     g["23"] = {"class_type": "SaveImage", "inputs": {"images": ["22", 0], "filename_prefix": p.prefix}}
     if p.scale > 1 and p.scale_mode == "post-dit":
         # Ausgabegroesse kommt aus der Referenz: Flaeche x scale^2
-        mp = p.ref_megapixels or p.ref_base_mp
-        tw = th = int(round((mp * p.scale ** 2 * 1048576.0) ** 0.5))
-        add_upscale_tail(g, ["22", 0], tw, th, "23")
+        area, _ = ref_area_mp(p, sizes)
+        side = int(round((area * p.scale ** 2) ** 0.5))
+        add_upscale_tail(g, ["22", 0], side, side, "23")
     return g
 
 
-def build_upscale_only(p, ref_name):
+def build_upscale_only(p, ref_name, sizes):
     """Kein DiT: nur KI-Upscale der ersten Referenz."""
     g = {"1": {"class_type": "LoadImage", "inputs": {"image": ref_name}},
          "5": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": p.prefix}}}
-    side = target_side(p)
+    area, _ = ref_area_mp(p, sizes)
+    side = int(round((area * p.scale ** 2) ** 0.5))
     add_upscale_tail(g, ["1", 0], side, side, "5")
     return g
 
 
-def target_side(p):
-    """Kantenlaenge des Ziels aus Referenzflaeche x scale^2 (quadratisch genaehert)."""
-    mp = (p.ref_megapixels or p.ref_base_mp) * p.scale ** 2
-    return int(round((mp * 1048576.0) ** 0.5))
+def ref_area_mp(p, sizes):
+    """Flaeche (MP) und Seitenverhaeltnis der ersten Referenz nach dem Resize.
+    --ref-mp > 0: Zielflaeche = MP x 1024^2, Seitenverhaeltnis der Quelle.
+    --ref-mp = 0: Originalmasse."""
+    if sizes and sizes[0]:
+        w0, h0 = sizes[0]
+        aspect = w0 / float(h0)
+        area = p.ref_mp * 1048576.0 if p.ref_mp else float(w0 * h0)
+        return area, aspect
+    return (p.ref_mp or 1.0) * 1048576.0, 1.0
+
+
+def expected_output(p, refs, sizes):
+    """Erwartete Ausgabegroesse - dieselbe Logik wie der Graph."""
+    if not refs:
+        if p.scale > 1 and p.scale_mode == "post-dit":
+            return int(p.w * p.scale), int(p.h * p.scale)
+        return p.w, p.h
+    area, aspect = ref_area_mp(p, sizes)
+    if p.scale_mode == "upscale-no-dit" or p.scale > 1:
+        area *= p.scale ** 2
+    w = int(round((area * aspect) ** 0.5))
+    h = int(round((area / aspect) ** 0.5))
+    # Latent-Raster: die Ausgabe folgt dem 16er-Raster des Latents
+    return max(16, w - w % 16), max(16, h - h % 16)
 
 
 def main():
@@ -144,9 +166,10 @@ def main():
     ap.add_argument("--scale-mode", default="post-dit", metavar="MODUS",
                     help="post-dit (post, Default): DiT in Basisgroesse + KI-Upscale; "
                          "upscale-no-dit (upscale): nur KI-Upscale, kein DiT (braucht eine Referenz)")
-    ap.add_argument("--ref-megapixels", type=float, default=PROFILE["ref_megapixels"],
-                    help="Referenzbilder vor dem Encoding auf diese Groesse bringen "
-                         "(1.0 ~ 1024x1024, Default). 0 = Originalmasse behalten.")
+    ap.add_argument("--ref-mp", type=float, default=PROFILE["ref_mp"], metavar="MP",
+                    help="Zielgroesse JEDES Referenzbildes vor dem Encoding, in Megapixeln "
+                         "(1.0 ~ 1024x1024, Default). Skaliert mit Lanczos, "
+                         "Seitenverhaeltnis bleibt. 0 = Originalmasse behalten.")
     ap.add_argument("--model", default=PROFILE["model"], help="DiT (GGUF) ueberschreiben")
     ap.add_argument("--te", default=PROFILE["te"], help="Text-Encoder ueberschreiben")
     ap.add_argument("--vae", default=PROFILE["vae"], help="VAE ueberschreiben")
@@ -175,12 +198,7 @@ def main():
     refs, sizes = collect_refs(p.server, p.refs)
     if refs and p.size != "1024x1024":
         print("Hinweis: --size wird beim Editing ignoriert "
-              "(Groesse = Referenz x --ref-megapixels).")
-    # Basisflaeche der Referenz: aus --ref-megapixels, sonst aus den echten Massen
-    p.ref_base_mp = 1.0
-    if sizes and sizes[0]:
-        w0, h0 = sizes[0]
-        p.ref_base_mp = (w0 * h0) / 1048576.0 if not p.ref_megapixels else 1.0
+              "(Groesse = Referenz x --ref-mp).")
 
     needs_upscaler = p.scale > 1 and p.scale_mode == "post-dit" or p.scale_mode == "upscale-no-dit"
     if p.scale_mode == "upscale-no-dit":
@@ -198,21 +216,16 @@ def main():
     preflight(p.server, checks)
 
     if p.scale_mode == "upscale-no-dit":
-        graph, mode = build_upscale_only(p, refs[0]), "upscale"
+        graph, mode = build_upscale_only(p, refs[0], sizes), "upscale"
     else:
-        graph = build_edit(p, refs) if refs else build_t2i(p)
+        graph = build_edit(p, refs, sizes) if refs else build_t2i(p)
         mode = "edit" if refs else "t2i"
     dest = out_path(p.out, p.prefix, p.seed)
 
     t0 = time.time()
     saved, secs, pid = run_graph(p.server, graph, p.timeout, out=dest, prefix=p.prefix,
                                  metadata=p.metadata, quiet=p.json)
-    if p.scale > 1 and p.scale_mode == "post-dit" and not refs:
-        out_w, out_h = int(p.w * p.scale), int(p.h * p.scale)
-    elif p.scale_mode == "upscale-no-dit" or (refs and p.scale > 1):
-        out_w = out_h = target_side(p)
-    else:
-        out_w, out_h = p.w, p.h
+    out_w, out_h = expected_output(p, refs, sizes)
     if not p.json:
         print("Ziel: %dx%d [%s, scale %.2g]" % (out_w, out_h, p.scale_mode, p.scale))
     if p.json:
